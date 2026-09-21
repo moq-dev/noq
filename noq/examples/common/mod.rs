@@ -1,7 +1,7 @@
 #![cfg(all(feature = "rustls", any(feature = "aws-lc-rs", feature = "ring")))]
 //! Commonly used code in most examples.
 
-use noq::{ClientConfig, Endpoint, ServerConfig};
+use moq_noq::{ClientConfig, Endpoint, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use std::{error::Error, net::SocketAddr, sync::Arc};

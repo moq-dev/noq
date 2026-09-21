@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         let conn = incoming_conn.await.unwrap();
         println!(
             "[server] connection accepted: addr={}",
-            conn.path(noq::PathId::ZERO)
+            conn.path(moq_noq::PathId::ZERO)
                 .expect("path open after connect")
                 .remote_address()
                 .expect("path is alive")
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     println!(
         "[client] connected: addr={}",
         connection
-            .path(noq::PathId::ZERO)
+            .path(moq_noq::PathId::ZERO)
             .expect("path open after connect")
             .remote_address()
             .expect("path is alive")

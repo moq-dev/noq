@@ -73,7 +73,7 @@ impl Endpoint {
     /// address. For example:
     ///
     /// ```
-    /// noq::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into());
+    /// moq_noq::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into());
     /// ```
     ///
     /// Some environments may not allow creation of dual-stack sockets, in which case an IPv6

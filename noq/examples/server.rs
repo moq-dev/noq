@@ -129,7 +129,7 @@ async fn run(options: Opt) -> Result<()> {
     }
 
     let mut server_config =
-        noq::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+        moq_noq::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config
         .max_concurrent_uni_streams(0_u8.into())
@@ -141,7 +141,7 @@ async fn run(options: Opt) -> Result<()> {
         bail!("root path does not exist");
     }
 
-    let endpoint = noq::Endpoint::server(server_config, options.listen)?;
+    let endpoint = moq_noq::Endpoint::server(server_config, options.listen)?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
     while let Some(conn) = endpoint.accept().await {
@@ -171,15 +171,15 @@ async fn run(options: Opt) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection(root: Arc<Path>, conn: noq::Incoming) -> Result<()> {
+async fn handle_connection(root: Arc<Path>, conn: moq_noq::Incoming) -> Result<()> {
     let connection = conn.await?;
     let span = info_span!(
         "connection",
-        remote = ?connection.path(noq::PathId::ZERO).and_then(|p| p.remote_address().ok()),
+        remote = ?connection.path(moq_noq::PathId::ZERO).and_then(|p| p.remote_address().ok()),
         protocol = %connection
             .handshake_data()
             .unwrap()
-            .downcast::<noq::crypto::rustls::HandshakeData>().unwrap()
+            .downcast::<moq_noq::crypto::rustls::HandshakeData>().unwrap()
             .protocol
             .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
     );
@@ -200,7 +200,7 @@ async fn handle_connection(root: Arc<Path>, conn: noq::Incoming) -> Result<()> {
         loop {
             let stream = connection.accept_bi().await;
             let stream = match stream {
-                Err(noq::ConnectionError::ApplicationClosed { .. }) => {
+                Err(moq_noq::ConnectionError::ApplicationClosed { .. }) => {
                     info!("connection closed");
                     return Ok(());
                 }
@@ -227,7 +227,7 @@ async fn handle_connection(root: Arc<Path>, conn: noq::Incoming) -> Result<()> {
 
 async fn handle_request(
     root: Arc<Path>,
-    (mut send, mut recv): (noq::SendStream, noq::RecvStream),
+    (mut send, mut recv): (moq_noq::SendStream, moq_noq::RecvStream),
 ) -> Result<()> {
     let req = recv
         .read_to_end(64 * 1024)

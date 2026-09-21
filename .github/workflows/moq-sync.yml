@@ -1,0 +1,49 @@
+# Merges n0-computer/noq main into the fork weekly and opens a pull request
+# with the result, so drift is visible before it is expensive. A merge that
+# conflicts fails the job; resolve it by hand with the same commands.
+name: moq-sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/n0-computer/noq.git
+          git fetch upstream main
+          parent=$(git rev-parse upstream/main)
+          if test "$(cat PARENT)" = "$parent"; then
+            echo "up to date with $parent"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git merge --no-edit upstream/main
+          echo "$parent" > PARENT
+          git commit -am "chore: record parent $parent"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "parent=$parent" >> "$GITHUB_OUTPUT"
+      - uses: peter-evans/create-pull-request@v7
+        if: steps.merge.outputs.changed == 'true'
+        with:
+          branch: sync/upstream
+          title: "chore: sync with n0-computer/noq"
+          body: |
+            Merges n0-computer/noq main at ${{ steps.merge.outputs.parent }}.
+
+            Compare the carried set with `git log --no-merges upstream/main..main`.

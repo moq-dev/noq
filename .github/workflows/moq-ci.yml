@@ -1,0 +1,51 @@
+# The fork's own CI. Upstream's workflows stay in the tree so a sync never
+# conflicts on them, but they are disabled in the repository settings because
+# they need n0's self-hosted runners and secrets.
+name: moq-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: moq-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -Dwarnings
+  RUSTDOCFLAGS: -Dwarnings
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      # Every commit must stay publishable, so the release job cannot fail on metadata.
+      - run: cargo publish --workspace --locked --dry-run
+
+  parent:
+    name: PARENT names an upstream commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: |
+          parent=$(cat PARENT)
+          git fetch --depth=1 https://github.com/n0-computer/noq.git "$parent"

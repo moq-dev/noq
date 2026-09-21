@@ -425,7 +425,7 @@ dependencies = [
  "bytes",
  "clap",
  "hdrhistogram",
- "noq",
+ "moq-noq",
  "rcgen",
  "rustls",
  "tokio",
@@ -1174,7 +1174,7 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
- "noq-proto",
+ "moq-noq-proto",
 ]
 
 [[package]]
@@ -1793,30 +1793,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "n0-qlog"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1c2fc610d1facce51b0bf5d8245b309c91996a933defdf7742c92ac78a58cb"
-dependencies = [
- "humantime",
- "serde",
- "serde_json",
- "serde_with",
- "strum",
-]
-
-[[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
-]
-
-[[package]]
-name = "noq"
+name = "moq-noq"
 version = "1.3.0"
 dependencies = [
  "anyhow",
@@ -1837,8 +1814,8 @@ dependencies = [
  "gcc",
  "http",
  "lazy_static",
- "noq-proto",
- "noq-udp",
+ "moq-noq-proto",
+ "moq-noq-udp",
  "pin-project-lite",
  "rand 0.10.2",
  "rcgen",
@@ -1859,7 +1836,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "noq-proto"
+name = "moq-noq-proto"
 version = "1.3.0"
 dependencies = [
  "aes-gcm",
@@ -1899,7 +1876,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "noq-udp"
+name = "moq-noq-udp"
 version = "1.3.0"
 dependencies = [
  "cfg_aliases",
@@ -1910,6 +1887,29 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "n0-qlog"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb1c2fc610d1facce51b0bf5d8245b309c91996a933defdf7742c92ac78a58cb"
+dependencies = [
+ "humantime",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+]
+
+[[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
 ]
 
 [[package]]
@@ -2058,8 +2058,8 @@ dependencies = [
  "clap",
  "console-subscriber",
  "hdrhistogram",
- "noq",
- "noq-proto",
+ "moq-noq",
+ "moq-noq-proto",
  "rcgen",
  "rustls",
  "serde",

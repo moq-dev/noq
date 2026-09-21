@@ -10,7 +10,7 @@ use tokio::runtime::{Builder, Runtime};
 use tracing::error_span;
 use tracing_futures::Instrument as _;
 
-use noq::{Endpoint, TokioRuntime};
+use moq_noq::{Endpoint, TokioRuntime};
 
 criterion_group!(
     benches,
@@ -75,8 +75,8 @@ fn send_data(name: &str, c: &mut Criterion, data: &'static [u8], concurrent_stre
 }
 
 struct Context {
-    server_config: noq::ServerConfig,
-    client_config: noq::ClientConfig,
+    server_config: moq_noq::ServerConfig,
+    client_config: moq_noq::ClientConfig,
 }
 
 impl Context {
@@ -86,7 +86,7 @@ impl Context {
         let cert = CertificateDer::from(cert.cert);
 
         let mut server_config =
-            noq::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+            moq_noq::ServerConfig::with_single_cert(vec![cert.clone()], key.into()).unwrap();
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_concurrent_uni_streams(1024_u16.into());
 
@@ -95,7 +95,7 @@ impl Context {
 
         Self {
             server_config,
-            client_config: noq::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap(),
+            client_config: moq_noq::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap(),
         }
     }
 
@@ -141,7 +141,7 @@ impl Context {
     pub(crate) fn make_client(
         &self,
         server_addr: SocketAddr,
-    ) -> (noq::Endpoint, noq::Connection, Runtime) {
+    ) -> (moq_noq::Endpoint, moq_noq::Connection, Runtime) {
         let runtime = rt();
         let endpoint = {
             let _guard = runtime.enter();

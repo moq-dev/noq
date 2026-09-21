@@ -12,7 +12,7 @@ use rustls::{
 };
 use tracing::info;
 
-use noq::{
+use moq_noq::{
     Endpoint,
     crypto::rustls::{HandshakeData, QuicClientConfig, QuicServerConfig},
 };
@@ -43,7 +43,7 @@ async fn check_post_quantum_key_exchange(min_mtu: u16) {
         let conn = incoming_conn.await.unwrap();
         info!(
             "[server] connection accepted: addr={}",
-            conn.path(noq::PathId::ZERO)
+            conn.path(moq_noq::PathId::ZERO)
                 .expect("path open after connect")
                 .remote_address()
                 .expect("path is alive")
@@ -69,7 +69,7 @@ async fn check_post_quantum_key_exchange(min_mtu: u16) {
     info!(
         "[client] connected: addr={}",
         connection
-            .path(noq::PathId::ZERO)
+            .path(moq_noq::PathId::ZERO)
             .expect("path open after connect")
             .remote_address()
             .expect("path is alive")
@@ -98,7 +98,7 @@ fn make_client_endpoint(
     .with_no_client_auth();
 
     let client_cfg =
-        noq::ClientConfig::new(Arc::new(QuicClientConfig::try_from(rustls_config).unwrap()));
+        moq_noq::ClientConfig::new(Arc::new(QuicClientConfig::try_from(rustls_config).unwrap()));
     let endpoint = Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(client_cfg);
     Ok(endpoint)
@@ -111,7 +111,7 @@ fn make_server_endpoint(
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = CertificateDer::from(cert.cert);
-    let mut server_config = noq::ServerConfig::with_crypto(Arc::new(
+    let mut server_config = moq_noq::ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(
             rustls::ServerConfig::builder_with_provider(Arc::new(
                 rustls::crypto::aws_lc_rs::default_provider(),

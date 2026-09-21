@@ -8,7 +8,7 @@ use std::{
 use criterion::{Criterion, criterion_group, criterion_main};
 use tokio::{io::Interest, runtime::Runtime};
 
-use noq_udp::{BATCH_SIZE, RecvMeta, Transmit, UdpSocketState};
+use moq_noq_udp::{BATCH_SIZE, RecvMeta, Transmit, UdpSocketState};
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     const TOTAL_BYTES: usize = 10 * 1024 * 1024;

@@ -1508,7 +1508,7 @@ impl IncomingImproperDropWarner {
 impl Drop for IncomingImproperDropWarner {
     fn drop(&mut self) {
         warn!(
-            "noq_proto::Incoming dropped without passing to Endpoint::accept/refuse/retry/ignore \
+            "moq_noq_proto::Incoming dropped without passing to Endpoint::accept/refuse/retry/ignore \
                (may cause memory leak and eventual inability to accept new connections)"
         );
     }
