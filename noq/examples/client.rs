@@ -107,9 +107,9 @@ async fn run(options: Opt) -> Result<()> {
         .send_observed_address_reports(true)
         .receive_observed_address_reports(true);
     let mut client_config =
-        noq::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+        moq_noq::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
     client_config.transport_config(Arc::new(transport));
-    let endpoint = noq::Endpoint::client(options.bind)?;
+    let endpoint = moq_noq::Endpoint::client(options.bind)?;
     endpoint.set_default_client_config(client_config);
 
     let request = format!("GET {}\r\n", url.path());

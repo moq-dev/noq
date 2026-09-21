@@ -6,7 +6,7 @@ use std::{
     slice,
 };
 
-use noq_udp::{EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
+use moq_noq_udp::{EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
 use socket2::Socket;
 
 /// Detect if running under Wine (test helper)
@@ -546,7 +546,7 @@ fn apple_fast_datapath() {
     );
     assert_eq!(
         send_state.max_gso_segments().get(),
-        noq_udp::BATCH_SIZE,
+        moq_noq_udp::BATCH_SIZE,
         "max_gso_segments should be BATCH_SIZE after enabling fast path"
     );
 

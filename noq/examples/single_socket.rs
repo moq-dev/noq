@@ -7,7 +7,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-use noq::Endpoint;
+use moq_noq::Endpoint;
 
 mod common;
 use common::{make_client_endpoint, make_server_endpoint};
@@ -51,7 +51,7 @@ fn run_server(
         println!(
             "[server] incoming connection: addr={}",
             connection
-                .path(noq::PathId::ZERO)
+                .path(moq_noq::PathId::ZERO)
                 .expect("path open after connect")
                 .remote_address()
                 .expect("path is alive")
@@ -68,7 +68,7 @@ async fn run_client(endpoint: &Endpoint, server_addr: SocketAddr) {
     println!(
         "[client] connected: addr={}",
         connection
-            .path(noq::PathId::ZERO)
+            .path(moq_noq::PathId::ZERO)
             .expect("path open after connect")
             .remote_address()
             .expect("path is alive")

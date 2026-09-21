@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use noq::{ClientConfig, Endpoint};
+use moq_noq::{ClientConfig, Endpoint};
 use proto::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
@@ -32,7 +32,7 @@ async fn run_server(addr: SocketAddr) {
     let conn = incoming_conn.await.unwrap();
     println!(
         "[server] connection accepted: addr={}",
-        conn.path(noq::PathId::ZERO)
+        conn.path(moq_noq::PathId::ZERO)
             .expect("path open after connect")
             .remote_address()
             .expect("path is alive")
@@ -58,7 +58,7 @@ async fn run_client(server_addr: SocketAddr) -> Result<(), Box<dyn Error + Send 
     println!(
         "[client] connected: addr={}",
         connection
-            .path(noq::PathId::ZERO)
+            .path(moq_noq::PathId::ZERO)
             .expect("path open after connect")
             .remote_address()
             .expect("path is alive")
