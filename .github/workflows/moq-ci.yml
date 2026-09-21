@@ -33,8 +33,10 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
+      # The same rustfmt options as upstream's `cargo make format-check`.
+      - run: cargo fmt --all --check -- --config unstable_features=true --config imports_granularity=Crate,group_imports=Preserve,reorder_imports=false,format_code_in_doc_comments=true,comment_width=100,wrap_comments=true
       - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo doc --workspace --no-deps --locked
       - run: cargo test --workspace --locked
       # Every commit must stay publishable, so the release job cannot fail on metadata.
       - run: cargo publish --workspace --locked --dry-run
