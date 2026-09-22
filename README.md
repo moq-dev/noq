@@ -2,9 +2,11 @@
 
 This is [moq-dev](https://github.com/moq-dev)'s fork of
 [n0-computer/noq](https://github.com/n0-computer/noq), published on crates.io as
-`moq-noq`, `moq-noq-proto`, and `moq-noq-udp`. It carries the QUIC features
-[Media over QUIC](https://github.com/moq-dev/moq) needs before they land
-upstream, and it never publishes under the parent's names. `PARENT` names the
+`moq-noq`, `moq-noq-proto`, `moq-noq-udp`, and `web-transport-moq`, the
+WebTransport adapter over the fork. All four share one version and one release.
+It carries the QUIC features [Media over QUIC](https://github.com/moq-dev/moq)
+needs before they land upstream, and it never publishes under the parent's
+names. `PARENT` names the
 upstream commit each release includes, and `moq-sync` merges upstream weekly.
 General changes are offered upstream once their shape settles; the carried set
 is `git log --no-merges upstream/main..main`.
