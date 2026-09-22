@@ -28,21 +28,17 @@ Both endpoints can send datagrams below the MTU size (~1.2kb minimum) and they m
 They are basically UDP packets, except they are encrypted and congestion controlled.
 
 # Usage
-To use web-transport-moq, first you need to create a [noq::Endpoint](https://docs.rs/moq-noq/latest/moq_noq/struct.Endpoint.html); see the documentation and examples for more information.
-The only requirement is that the ALPN is set to `web_transport_moq::ALPN` (aka `h3`).
+Build a [Client](https://docs.rs/web-transport-moq/latest/web_transport_moq/struct.Client.html) or [Server](https://docs.rs/web-transport-moq/latest/web_transport_moq/struct.Server.html) with its builder, or wrap your own [noq::Endpoint](https://docs.rs/moq-noq/latest/moq_noq/struct.Endpoint.html) with `Client::new` / `Server::new`; the only requirement is that the ALPN is set to `web_transport_moq::ALPN` (aka `h3`).
+Connecting or accepting takes over the QUIC connection and performs the boring HTTP/3 handshake for you.
 
-Afterwards, you use [web_transport_moq::accept](https://docs.rs/web-transport-moq/latest/web_transport_moq/fn.accept.html) (as a server) or [web_transport_moq::connect](https://docs.rs/web-transport-moq/latest/web_transport_moq/fn.connect.html) (as a client) to establish a WebTransport session.
-This will take over the QUIC connection and perform the boring HTTP/3 handshake for you.
-
-See the [examples](examples) or [moq-native](https://github.com/moq-dev/moq-rs/blob/main/moq-native/src/quic.rs) for a full setup.
+See the [examples](examples) or [moq-tokio](https://github.com/moq-dev/moq/blob/main/rs/moq-tokio/src/noq.rs) for a full setup.
 
 ```rust
-    // Create a QUIC client.
-    let mut endpoint = noq::Endpoint::client("[::]:0".parse()?)?;
-    endpoint.set_default_client_config(/* ... */);
+    // Create a QUIC client that trusts the system roots.
+    let client = web_transport_moq::ClientBuilder::new().with_system_roots()?;
 
     // Connect to the given URL.
-    let session = web_transport_moq::connect(&client, Url::parse("https://localhost")?).await?;
+    let session = client.connect(Url::parse("https://localhost")?).await?;
 
     // Create a bidirectional stream.
     let (mut send, mut recv) = session.open_bi().await?;
