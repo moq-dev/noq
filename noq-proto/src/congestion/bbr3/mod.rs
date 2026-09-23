@@ -522,8 +522,8 @@ pub struct Bbr3 {
     /// equivalent to BBR.bw_probe_up_acks: volume of data in bytes that has been acknowledged
     /// during probe up state
     bw_probe_up_acks: u64,
-    /// equivalent to BBR.probe_up_cnt: count of the number of times we've grown the cwnd during
-    /// probe up state
+    /// equivalent to BBR.probe_up_acked_per_inc: bytes to acknowledge per SMSS of
+    /// `inflight_longterm` growth during probe up state
     probe_up_cnt: u64,
     /// equivalent to BBR.cycle_stamp: timestamp when we start probing down state
     cycle_stamp: Option<Instant>,
@@ -1107,7 +1107,10 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    ///
+    /// Growing in whole packets lets the cwnd catch up between increments, so PROBE_UP sees the
+    /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it.
     fn probe_inflight_long_term_upward(&mut self) {
         if !self.is_cwnd_limited || self.cwnd < self.inflight_longterm {
             return;
@@ -1118,7 +1121,7 @@ impl Bbr3 {
         if self.bw_probe_up_acks >= self.probe_up_cnt && self.probe_up_cnt > 0 {
             let delta = self.bw_probe_up_acks / self.probe_up_cnt;
             self.bw_probe_up_acks -= delta * self.probe_up_cnt;
-            self.inflight_longterm += delta;
+            self.inflight_longterm += delta * self.smss;
         }
         if self.round_start {
             self.raise_inflight_long_term_slope();
@@ -1260,15 +1263,14 @@ impl Bbr3 {
         self.full_bw_now = false;
     }
 
-    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
     fn raise_inflight_long_term_slope(&mut self) {
-        let growth_this_round = self
-            .smss
+        let growth_this_round = 1u64
             .checked_shl(self.bw_probe_up_rounds)
             .unwrap_or(u64::MAX);
         self.bw_probe_up_rounds =
             Ord::min(self.bw_probe_up_rounds + 1, MAX_LONG_TERM_PROBE_UP_ROUNDS);
-        self.probe_up_cnt = Ord::max(self.cwnd / growth_this_round, 1);
+        self.probe_up_cnt = Ord::max(self.cwnd / growth_this_round, self.smss);
     }
 
     /// equivalent to BBRHandleRestartFromIdle <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.4.1>
@@ -4978,11 +4980,12 @@ mod test {
     /// it rediscovers a much larger BDP in O(log(BDP)) round trips rather than linearly.
     ///
     /// The step doubling comes from `raise_inflight_long_term_slope`, called once per round-start
-    /// while probing up: `growth_this_round = SMSS << bw_probe_up_rounds` and `bw_probe_up_rounds`
-    /// increments each round, so the unit of growth doubles every round. `probe_up_cnt` (bytes to
-    /// ack per +1 byte of `inflight_longterm`) is set to `cwnd / growth_this_round`, so over one
-    /// round (~cwnd bytes acked) `inflight_longterm` climbs by ~`growth_this_round`, a per-round
-    /// increment that doubles each round.
+    /// while probing up: `growth_this_round = 1 << bw_probe_up_rounds` packets and
+    /// `bw_probe_up_rounds` increments each round, so the unit of growth doubles every round.
+    /// `probe_up_cnt` (bytes to ack per SMSS of `inflight_longterm`) is set to
+    /// `max(cwnd / growth_this_round, SMSS)`, so over one round (~cwnd bytes acked)
+    /// `inflight_longterm` climbs by ~`growth_this_round` packets, a per-round increment that
+    /// doubles each round.
     ///
     /// The growth path only engages when the flow is genuinely cwnd-limited. That signal is
     /// spec-defined as connection-provided (`C.is_cwnd_limited`), so the harness reports it exactly
