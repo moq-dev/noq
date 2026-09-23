@@ -3177,17 +3177,19 @@ impl Connection {
             Ok(false) => {}
             Ok(true) => {
                 self.path_stats.get_mut(path).congestion_events += 1;
-                self.path_data_mut(path).congestion.on_congestion(
-                    now,
-                    largest_sent_time,
-                    false,
-                    true,
-                    0,
-                    PacketId {
-                        space: space.kind(),
-                        number: largest_sent_pn,
-                    },
-                );
+                self.path_data_mut(path)
+                    .congestion
+                    .on_congestion_event_space(
+                        now,
+                        largest_sent_time,
+                        false,
+                        true,
+                        0,
+                        PacketId {
+                            space: space.kind(),
+                            number: largest_sent_pn,
+                        },
+                    );
             }
         }
     }
@@ -3211,7 +3213,7 @@ impl Connection {
             // 4-tuple into our congestion controller.
             let rtt = path.rtt;
             let packet = PacketId { space, number: pn };
-            path.congestion.on_acked(
+            path.congestion.on_packet_space_acked(
                 now,
                 info.time_sent,
                 info.size.into(),
@@ -3530,7 +3532,7 @@ impl Connection {
                     space: pn_space.kind(),
                     number: packet,
                 };
-                path.congestion.on_lost(info.size, lost, now);
+                path.congestion.on_packet_space_lost(info.size, lost, now);
 
                 self.spaces[pn_space].for_path(path_id).lost_packets.insert(
                     packet,
@@ -3559,17 +3561,19 @@ impl Connection {
 
             if lost_ack_eliciting {
                 self.path_stats.get_mut(path_id).congestion_events += 1;
-                self.path_data_mut(path_id).congestion.on_congestion(
-                    now,
-                    largest_lost_sent,
-                    in_persistent_congestion,
-                    false,
-                    size_of_lost_packets,
-                    PacketId {
-                        space: pn_space.kind(),
-                        number: largest_lost,
-                    },
-                );
+                self.path_data_mut(path_id)
+                    .congestion
+                    .on_congestion_event_space(
+                        now,
+                        largest_lost_sent,
+                        in_persistent_congestion,
+                        false,
+                        size_of_lost_packets,
+                        PacketId {
+                            space: pn_space.kind(),
+                            number: largest_lost,
+                        },
+                    );
             }
         }
 

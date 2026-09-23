@@ -1880,15 +1880,16 @@ impl Bbr3 {
     }
 }
 
-// The transport reports packet identity through `on_send`, `on_acked`, `on_lost` and
-// `on_congestion`. The pn-only callbacks assume `SpaceKind::Data`, which is only correct once the
-// handshake spaces are gone; they remain for direct callers of the old trait methods.
+// The transport reports packet identity through `on_packet_space_sent`, `on_packet_space_acked`,
+// `on_packet_space_lost` and `on_congestion_event_space`. The pn-only callbacks assume
+// `SpaceKind::Data`, which is only correct once the handshake spaces are gone; they remain for
+// direct callers of the old trait methods.
 impl Controller for Bbr3 {
-    fn on_send(&mut self, now: Instant, bytes: u16, packet: PacketId) {
+    fn on_packet_space_sent(&mut self, now: Instant, bytes: u16, packet: PacketId) {
         Self::on_packet_sent(self, now, bytes, packet.number, packet.space);
     }
 
-    fn on_acked(
+    fn on_packet_space_acked(
         &mut self,
         now: Instant,
         sent: Instant,
@@ -1909,11 +1910,11 @@ impl Controller for Bbr3 {
         );
     }
 
-    fn on_lost(&mut self, lost_bytes: u16, packet: PacketId, now: Instant) {
+    fn on_packet_space_lost(&mut self, lost_bytes: u16, packet: PacketId, now: Instant) {
         Self::on_packet_lost(self, lost_bytes, packet.number, packet.space, now);
     }
 
-    fn on_congestion(
+    fn on_congestion_event_space(
         &mut self,
         now: Instant,
         sent: Instant,
@@ -7070,13 +7071,13 @@ mod test {
         let at = |ms| t0 + Duration::from_millis(ms);
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_send(at(0), PACKET, INITIAL_0);
-        c.on_send(at(1), PACKET, INITIAL_1);
-        c.on_acked(at(10), at(0), PACKET as u64, INITIAL_0, false, &rtt);
+        c.on_packet_space_sent(at(0), PACKET, INITIAL_0);
+        c.on_packet_space_sent(at(1), PACKET, INITIAL_1);
+        c.on_packet_space_acked(at(10), at(0), PACKET as u64, INITIAL_0, false, &rtt);
         c.on_end_acks(at(10), PACKET as u64, false, Some(0));
         // Sent after Initial 0 was delivered, so its snapshot counts that delivery.
-        c.on_send(at(11), PACKET, HANDSHAKE_0);
-        c.on_acked(at(20), at(11), PACKET as u64, HANDSHAKE_0, false, &rtt);
+        c.on_packet_space_sent(at(11), PACKET, HANDSHAKE_0);
+        c.on_packet_space_acked(at(20), at(11), PACKET as u64, HANDSHAKE_0, false, &rtt);
 
         let rs = bbr.rs.expect("rate sample");
         assert_eq!(rs.last_packet.space, SpaceKind::Handshake);
@@ -7092,9 +7093,9 @@ mod test {
         let t0 = Instant::now();
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_send(t0, PACKET, INITIAL_0);
-        c.on_send(t0, PACKET, HANDSHAKE_0);
-        c.on_lost(PACKET, HANDSHAKE_0, t0 + Duration::from_millis(10));
+        c.on_packet_space_sent(t0, PACKET, INITIAL_0);
+        c.on_packet_space_sent(t0, PACKET, HANDSHAKE_0);
+        c.on_packet_space_lost(PACKET, HANDSHAKE_0, t0 + Duration::from_millis(10));
 
         assert_eq!(bbr.packets[SpaceKind::Initial as usize].len(), 1);
         assert!(bbr.packets[SpaceKind::Handshake as usize].is_empty());
@@ -7108,9 +7109,9 @@ mod test {
         let t0 = Instant::now();
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_send(t0, PACKET, INITIAL_0);
-        c.on_send(t0, PACKET, HANDSHAKE_0);
-        c.on_congestion(
+        c.on_packet_space_sent(t0, PACKET, INITIAL_0);
+        c.on_packet_space_sent(t0, PACKET, HANDSHAKE_0);
+        c.on_congestion_event_space(
             t0 + Duration::from_millis(10),
             t0,
             false,

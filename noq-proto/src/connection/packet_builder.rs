@@ -313,7 +313,7 @@ impl<'a, 'b> PacketBuilder<'a, 'b> {
                     conn.reset_idle_timeout(now, space_id.kind(), path_id);
                 }
                 conn.path_data_mut(path_id).permit_idle_reset = false;
-                conn.path_data_mut(path_id).congestion.on_send(
+                conn.path_data_mut(path_id).congestion.on_packet_space_sent(
                     now,
                     size,
                     PacketId {

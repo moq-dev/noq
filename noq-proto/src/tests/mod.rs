@@ -4828,11 +4828,11 @@ impl PacketRecorder {
 }
 
 impl Controller for PacketRecorder {
-    fn on_send(&mut self, now: Instant, _bytes: u16, packet: PacketId) {
+    fn on_packet_space_sent(&mut self, now: Instant, _bytes: u16, packet: PacketId) {
         self.push(PacketEvent::Sent { at: now, packet });
     }
 
-    fn on_acked(
+    fn on_packet_space_acked(
         &mut self,
         _now: Instant,
         sent: Instant,
@@ -4844,11 +4844,11 @@ impl Controller for PacketRecorder {
         self.push(PacketEvent::Acked { sent, packet });
     }
 
-    fn on_lost(&mut self, _lost_bytes: u16, packet: PacketId, _now: Instant) {
+    fn on_packet_space_lost(&mut self, _lost_bytes: u16, packet: PacketId, _now: Instant) {
         self.push(PacketEvent::Lost { packet });
     }
 
-    fn on_congestion(
+    fn on_congestion_event_space(
         &mut self,
         _now: Instant,
         _sent: Instant,
