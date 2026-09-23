@@ -1,11 +1,12 @@
 use std::{
     any::Any,
+    collections::{HashMap, HashSet},
     convert::TryInto,
     mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroUsize,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -31,12 +32,13 @@ use crate::{
     ConnectionError, ConnectionEvent, ConnectionHandle, DEFAULT_SUPPORTED_VERSIONS, Datagram,
     DatagramEvent, Dir, Duration, EcnCodepoint, Endpoint, EndpointConfig, Event, FinishError,
     FourTuple, HashedConnectionIdGenerator, Instant, MIN_INITIAL_SIZE, PathEvent, PathId,
-    PathStatus, ReadError, ReadableError, RecvStream, SendDatagramError, ServerConfig,
+    PathStatus, ReadError, ReadableError, RecvStream, RttEstimator, SendDatagramError,
+    ServerConfig,
     Side::*,
     StreamEvent, Transmit, TransportConfig, TransportErrorCode, VarInt, WriteError,
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
     coding::{Decodable, Encodable},
-    congestion::{Controller, ControllerFactory, ControllerMetrics},
+    congestion::{Controller, ControllerFactory, ControllerMetrics, PacketId, Space},
     crypto::rustls::{QuicServerConfig, configured_provider},
     frame::{self, Frame, FrameStruct},
     packet::{FixedLengthConnectionIdParser, PartialDecode},
@@ -4799,6 +4801,244 @@ fn send_quantum_bounds_the_gso_batch() {
     assert!(
         datagrams <= QUANTUM_DATAGRAMS,
         "batched {datagrams} datagrams, over the {QUANTUM_DATAGRAMS} the send quantum allows"
+    );
+}
+
+/// A per-packet congestion callback, as the transport reported it.
+#[derive(Debug, Clone, Copy)]
+enum PacketEvent {
+    Sent { at: Instant, packet: PacketId },
+    Acked { sent: Instant, packet: PacketId },
+    Lost { packet: PacketId },
+    Congestion { largest: PacketId, ecn: bool },
+}
+
+type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
+
+/// Records the packet-identity callbacks and fails on the pn-only ones the transport replaced.
+#[derive(Debug, Clone)]
+struct PacketRecorder {
+    log: PacketLog,
+}
+
+impl PacketRecorder {
+    fn push(&self, event: PacketEvent) {
+        self.log.lock().unwrap().push(event);
+    }
+}
+
+impl Controller for PacketRecorder {
+    fn on_send(&mut self, now: Instant, _bytes: u16, packet: PacketId) {
+        self.push(PacketEvent::Sent { at: now, packet });
+    }
+
+    fn on_acked(
+        &mut self,
+        _now: Instant,
+        sent: Instant,
+        _bytes: u64,
+        packet: PacketId,
+        _app_limited: bool,
+        _rtt: &RttEstimator,
+    ) {
+        self.push(PacketEvent::Acked { sent, packet });
+    }
+
+    fn on_lost(&mut self, _lost_bytes: u16, packet: PacketId, _now: Instant) {
+        self.push(PacketEvent::Lost { packet });
+    }
+
+    fn on_congestion(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        is_ecn: bool,
+        _lost_bytes: u64,
+        largest_lost: PacketId,
+    ) {
+        self.push(PacketEvent::Congestion {
+            largest: largest_lost,
+            ecn: is_ecn,
+        });
+    }
+
+    fn on_packet_sent(&mut self, _now: Instant, _bytes: u16, _pn: u64) {
+        panic!("transport called the pn-only on_packet_sent");
+    }
+
+    fn on_ack(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _bytes: u64,
+        _pn: u64,
+        _app_limited: bool,
+        _rtt: &RttEstimator,
+    ) {
+        panic!("transport called the pn-only on_ack");
+    }
+
+    fn on_packet_lost(&mut self, _lost_bytes: u16, _pn: u64, _now: Instant) {
+        panic!("transport called the pn-only on_packet_lost");
+    }
+
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        _is_ecn: bool,
+        _lost_bytes: u64,
+        _largest_lost_pn: u64,
+    ) {
+        panic!("transport called the pn-only on_congestion_event");
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        u64::MAX / 2
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn initial_window(&self) -> u64 {
+        u64::MAX / 2
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+/// Gives every controller it builds, one per path per side, a log of its own.
+#[derive(Default)]
+struct PacketRecorderFactory {
+    logs: Mutex<Vec<PacketLog>>,
+}
+
+impl ControllerFactory for PacketRecorderFactory {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        let log = PacketLog::default();
+        self.logs.lock().unwrap().push(log.clone());
+        Box::new(PacketRecorder { log })
+    }
+}
+
+/// Asserts every ACK, loss, and congestion event in one controller's log names a packet that
+/// controller sent, with the ACK carrying that packet's own send time, and no packet is resolved
+/// twice. Returns the log for scenario-specific checks.
+fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
+    let events = log.lock().unwrap().clone();
+    let mut sent = HashMap::new();
+    let mut resolved = HashSet::new();
+    for event in &events {
+        match *event {
+            PacketEvent::Sent { at, packet } => {
+                assert!(sent.insert(packet, at).is_none(), "{packet:?} sent twice");
+            }
+            PacketEvent::Acked { sent: at, packet } => {
+                assert_eq!(
+                    sent.get(&packet),
+                    Some(&at),
+                    "{packet:?} acked with another send time"
+                );
+                assert!(resolved.insert(packet), "{packet:?} resolved twice");
+            }
+            PacketEvent::Lost { packet } => {
+                assert!(sent.contains_key(&packet), "{packet:?} lost but never sent");
+                assert!(resolved.insert(packet), "{packet:?} resolved twice");
+            }
+            PacketEvent::Congestion { largest, .. } => {
+                assert!(
+                    sent.contains_key(&largest),
+                    "{largest:?} congested but never sent"
+                );
+            }
+        }
+    }
+    events
+}
+
+/// Packet numbers restart in each space, so the handshake reuses Initial 0 and Handshake 0 in
+/// one coalesced datagram. Every callback the transport makes must say which one it means, through
+/// a lost server flight, ECN marks on the handshake, key discard, and application data.
+#[test]
+fn congestion_callbacks_identify_packets_across_spaces() {
+    let _guard = subscribe();
+    let factory = Arc::new(PacketRecorderFactory::default());
+    let mut transport = TransportConfig::default();
+    transport.deterministic_packet_numbers(true);
+    transport.congestion_controller_factory(factory.clone());
+    let transport = Arc::new(transport);
+
+    let mut server_cfg = server_config();
+    server_cfg.transport = transport.clone();
+    let mut pair = Pair::new(Default::default(), server_cfg);
+    let mut client_cfg = client_config();
+    client_cfg.transport = transport;
+
+    let client_ch = pair.begin_connect(client_cfg);
+    // Mark the ClientHello and the server's first flight, then drop that flight so the server
+    // retransmits and declares the originals lost.
+    pair.congestion_experienced = true;
+    pair.drive_client();
+    pair.drive_server();
+    pair.congestion_experienced = false;
+    pair.client.inbound.clear();
+    pair.drive();
+    assert!(!pair.client_conn_mut(client_ch).is_handshaking());
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; 16 * 1024])
+        .unwrap();
+    pair.drive();
+
+    let logs = factory.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 2, "one controller per side");
+    let logs: Vec<_> = logs.iter().map(check_packet_identity).collect();
+
+    // The server coalesces its first Initial and Handshake packets, both numbered 0.
+    let coalesced = |events: &Vec<PacketEvent>| {
+        let sent_at = |space| {
+            events.iter().find_map(|e| match *e {
+                PacketEvent::Sent { at, packet } if packet == PacketId { space, number: 0 } => {
+                    Some(at)
+                }
+                _ => None,
+            })
+        };
+        sent_at(Space::Initial).is_some() && sent_at(Space::Initial) == sent_at(Space::Handshake)
+    };
+    assert!(
+        logs.iter().any(coalesced),
+        "no coalesced Initial 0 and Handshake 0"
+    );
+
+    let events: Vec<_> = logs.into_iter().flatten().collect();
+    for space in [Space::Initial, Space::Handshake, Space::Data] {
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if packet.space == space)),
+            "no ACK reported in {space:?}"
+        );
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Lost { packet } if packet.space != Space::Data)),
+        "no handshake loss reported"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true } if largest.space != Space::Data)
+        ),
+        "no handshake ECN congestion reported"
     );
 }
 

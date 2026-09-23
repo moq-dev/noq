@@ -13,6 +13,21 @@ pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};
 pub use new_reno::{NewReno, NewRenoConfig};
 
+/// The packet number space a packet was sent in
+pub use crate::connection::SpaceKind as Space;
+
+/// A sent packet: its packet number space and its number within that space
+///
+/// Packet numbers restart from zero in each space, so the number alone is ambiguous while the
+/// handshake spaces are live. Each path has its own controller, so this is unique per controller.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct PacketId {
+    /// The packet number space
+    pub space: Space,
+    /// The packet number within `space`
+    pub number: u64,
+}
+
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync + std::fmt::Debug {
     /// One or more packets were just sent
@@ -20,8 +35,16 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     fn on_sent(&mut self, now: Instant, bytes: u64, largest_pn: u64) {}
 
     /// One packet was just sent
+    ///
+    /// The transport calls [`Self::on_send`] instead, whose default forwards here without the
+    /// packet number space. Kept for compatibility until a major release removes it.
     #[allow(unused_variables)]
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, pn: u64) {}
+
+    /// One packet was just sent, identified by its space and number
+    fn on_send(&mut self, now: Instant, bytes: u16, packet: PacketId) {
+        self.on_packet_sent(now, bytes, packet.number);
+    }
 
     /// The connection had data to send but was blocked by the congestion window
     ///
@@ -33,6 +56,9 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     ///
     /// `app_limited` indicates whether the connection was blocked on outgoing
     /// application data prior to receiving these acknowledgements.
+    ///
+    /// The transport calls [`Self::on_acked`] instead, whose default forwards here without the
+    /// packet number space. Kept for compatibility until a major release removes it.
     #[allow(unused_variables)]
     fn on_ack(
         &mut self,
@@ -43,6 +69,21 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
         app_limited: bool,
         rtt: &RttEstimator,
     ) {
+    }
+
+    /// One packet's delivery was confirmed, identified by its space and number
+    ///
+    /// The arguments otherwise match [`Self::on_ack`].
+    fn on_acked(
+        &mut self,
+        now: Instant,
+        sent: Instant,
+        bytes: u64,
+        packet: PacketId,
+        app_limited: bool,
+        rtt: &RttEstimator,
+    ) {
+        self.on_ack(now, sent, bytes, packet.number, app_limited, rtt);
     }
 
     /// Packets are acked in batches, all with the same `now` argument. This indicates one of those
@@ -65,6 +106,9 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     /// `lost_bytes` indicates how many bytes were lost. This value will be 0 for ECN triggers.
     /// `largest_lost_pn` indicates the packet number of the packet with the highest packet number
     /// in the congestion event.
+    ///
+    /// The transport calls [`Self::on_congestion`] instead, whose default forwards here without
+    /// the packet number space. Kept for compatibility until a major release removes it.
     fn on_congestion_event(
         &mut self,
         now: Instant,
@@ -75,9 +119,39 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
         largest_lost_pn: u64,
     );
 
+    /// Packets were deemed lost or marked congested, ending with the `largest_lost` packet
+    ///
+    /// The arguments otherwise match [`Self::on_congestion_event`].
+    fn on_congestion(
+        &mut self,
+        now: Instant,
+        sent: Instant,
+        is_persistent_congestion: bool,
+        is_ecn: bool,
+        lost_bytes: u64,
+        largest_lost: PacketId,
+    ) {
+        self.on_congestion_event(
+            now,
+            sent,
+            is_persistent_congestion,
+            is_ecn,
+            lost_bytes,
+            largest_lost.number,
+        );
+    }
+
     /// One packet was just lost
+    ///
+    /// The transport calls [`Self::on_lost`] instead, whose default forwards here without the
+    /// packet number space. Kept for compatibility until a major release removes it.
     #[allow(unused_variables)]
     fn on_packet_lost(&mut self, lost_bytes: u16, pn: u64, now: Instant) {}
+
+    /// One packet was just lost, identified by its space and number
+    fn on_lost(&mut self, lost_bytes: u16, packet: PacketId, now: Instant) {
+        self.on_packet_lost(lost_bytes, packet.number, now);
+    }
 
     /// Packets were incorrectly deemed lost
     ///
