@@ -1181,19 +1181,15 @@ impl Bbr3 {
 
     /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
     fn check_probe_rtt(&mut self, now: Instant) {
-        match self.state {
-            BbrState::ProbeRtt => {
-                self.handle_probe_rtt(now);
-            }
-            _ => {
-                if self.probe_rtt_expired && !self.idle_restart {
-                    self.enter_probe_rtt();
-                    self.save_cwnd();
-                    self.probe_rtt_done_stamp = None;
-                    self.ack_phase = AckPhase::ProbeStopping;
-                    self.start_round();
-                }
-            }
+        if self.state != BbrState::ProbeRtt && self.probe_rtt_expired && !self.idle_restart {
+            self.enter_probe_rtt();
+            self.save_cwnd();
+            self.probe_rtt_done_stamp = None;
+            self.ack_phase = AckPhase::ProbeStopping;
+            self.start_round();
+        }
+        if self.state == BbrState::ProbeRtt {
+            self.handle_probe_rtt(now);
         }
         if let Some(rate_sample) = self.rs
             && rate_sample.delivered > 0
@@ -1204,6 +1200,8 @@ impl Bbr3 {
 
     /// equivalent to BBRHandleProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
     fn handle_probe_rtt(&mut self, now: Instant) {
+        // Packets sent at the reduced ProbeRTT window do not measure the path's capacity.
+        self.on_app_limited(self.inflight);
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
             self.probe_rtt_done_stamp =
                 Some(now.checked_add(self.probe_rtt_duration).unwrap_or(now));
@@ -7397,8 +7395,9 @@ mod test {
         assert_eq!(sim.bbr.max_bw, 12_000_000.0);
     }
 
-    /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on the first
-    /// round after ProbeRTT returns to cruising.
+    /// ProbeRTT entered mid-probe ends the probe's feedback once. The round that finishes it
+    /// after ProbeRTT returns to cruising still carries ProbeRTT's protected samples, so the
+    /// window does not age, and later cruise rounds do not age it either.
     #[test]
     fn probe_rtt_finishes_probe_feedback_once() {
         let mut sim = probed();
@@ -7426,7 +7425,70 @@ mod test {
         for i in 0..5 {
             sim.round(now + i * 10 * MS, 100, 10 * MS);
         }
-        assert_eq!(sim.bbr.cycle_count, cycle + 1);
+        assert_eq!(sim.bbr.cycle_count, cycle);
+    }
+
+    /// A scripted `Sim` that has just entered ProbeRTT after measuring 12 MB/s over a 10ms RTT,
+    /// with a max-bw window that has since aged, so any unprotected sample replaces the maximum.
+    fn probing_rtt() -> Sim {
+        let mut sim = probed();
+        sim.bbr.probe_rtt_interval = Duration::ZERO;
+        sim.round(10 * MS, 100, 10 * MS);
+        sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+        sim.bbr.cycle_count += MAX_BW_FILTER_LEN as u64 + 1;
+        sim
+    }
+
+    /// Every packet sent during ProbeRTT, from the ACK that enters it, is application-limited, so
+    /// its reduced rate cannot replace the maximum, even when acknowledged after ProbeRTT ends.
+    /// Normal sampling resumes once those packets deliver, and the same rate then counts.
+    #[test]
+    fn probe_rtt_protects_its_samples() {
+        let mut sim = probing_rtt();
+        let newest_limited = |sim: &Sim| {
+            sim.bbr.packets[SpaceKind::Data as usize]
+                .back()
+                .unwrap()
+                .is_app_limited
+        };
+
+        // Each 10ms, send 4 packets and acknowledge the previous 4.
+        let mut now = 20 * MS;
+        sim.send(now, 4);
+        assert!(newest_limited(&sim));
+        while sim.bbr.state == BbrState::ProbeRtt {
+            let first = sim.pn - 4;
+            now += 10 * MS;
+            sim.send(now, 4);
+            assert!(newest_limited(&sim));
+            sim.ack(now, first..first + 4, false);
+            assert!(now < 1000 * MS, "ProbeRTT never ended");
+        }
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
+        assert_eq!(sim.bbr.max_bw, 12_000_000.0);
+
+        // The last batch sent during ProbeRTT delivers after it ends.
+        now += 10 * MS;
+        sim.ack(now, sim.pn - 4..sim.pn, false);
+        assert!(sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.max_bw, 12_000_000.0);
+
+        // One more round delivers past the protected interval, then 480 KB/s is a real sample.
+        sim.round(now, 4, 10 * MS);
+        assert_eq!(sim.bbr.app_limited, 0);
+        sim.round(now + 10 * MS, 4, 10 * MS);
+        assert!(!sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.max_bw, 480_000.0);
+    }
+
+    /// A sample above the maximum still raises it during ProbeRTT.
+    #[test]
+    fn probe_rtt_admits_a_higher_sample() {
+        let mut sim = probing_rtt();
+        sim.round(20 * MS, 200, 10 * MS);
+        assert!(sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.max_bw, 24_000_000.0);
     }
 
     /// Packet size for the packet identity tests.
