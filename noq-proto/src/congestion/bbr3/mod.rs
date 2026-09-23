@@ -507,6 +507,11 @@ pub struct Bbr3 {
     packets: [VecDeque<BbrPacket>; 3],
     /// equivalent to RS: Per-ACK Rate Sample State <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.2>
     rs: Option<BbrRateSample>,
+    /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
+    /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
+    rs_has_data: bool,
+    /// equivalent to RS.newly_acked, accumulated over the ACK being processed.
+    newly_acked: u64,
     /// equivalent to BBR.rounds_since_bw_probe: rounds since last bw probe state.
     rounds_since_bw_probe: u64,
     /// equivalent to BBR.bw_probe_wait: random wait time before entering probing state again
@@ -677,6 +682,8 @@ impl Bbr3 {
             app_limited: 0,
             lost: 0,
             rs: None,
+            rs_has_data: false,
+            newly_acked: 0,
             packets: Default::default(),
             rounds_since_bw_probe: 0,
             bw_probe_wait: Duration::ZERO,
@@ -1651,10 +1658,10 @@ impl Bbr3 {
         self.cwnd_limited_this_round = true;
     }
 
-    /// UpdateRateSample accumulates `C.delivered` and `C.delivered_time` for every ACKed packet,
-    /// independently of the newest-packet branch that folds the rate sample into the model, so
-    /// neither may be conditional on a rate sample already existing.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
+    /// equivalent to UpdateRateSample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
+    ///
+    /// Only records this ACK's newest packet; the model waits for [`Self::on_end_acks`], once the
+    /// ACK's delivered bytes, interval, and inflight are all known.
     fn on_ack(
         &mut self,
         now: Instant,
@@ -1663,77 +1670,47 @@ impl Bbr3 {
         packet_number: u64,
         space: SpaceKind,
         _app_limited: bool,
-        rtt: &RttEstimator,
+        _rtt: &RttEstimator,
     ) {
         self.check_recovery_done(sent);
         self.delivered += bytes;
         self.delivered_time = Some(now);
-        if let Some(mut rate_sample) = self.rs {
-            rate_sample.newly_acked += bytes;
-            self.rs = Some(rate_sample);
+        self.newly_acked += bytes;
+        let packets = &mut self.packets[space as usize];
+        let Ok(index) = packets.binary_search_by_key(&packet_number, |p| p.packet_number) else {
+            return;
+        };
+        packets[index].acknowledged = true;
+        let p = packets[index];
+        // The first packet of each ACK starts its sample even if older than the last ACK's newest,
+        // so a reordered ACK never inherits the previous ACK's labels.
+        if self.rs_has_data && !self.is_newest_packet(sent, space, packet_number) {
+            return;
         }
-        let p_index_result =
-            self.packets[space as usize].binary_search_by_key(&packet_number, |p| p.packet_number);
-        let is_newest_packet = self.is_newest_packet(sent, space, packet_number);
-        if let Ok(p_index) = p_index_result
-            && let Some(p) = self.packets[space as usize].get_mut(p_index)
-        {
-            p.acknowledged = true;
-            if let Some(mut rate_sample) = self.rs {
-                rate_sample.rtt = now - p.send_time;
-                if is_newest_packet {
-                    rate_sample.prior_delivered = p.delivered;
-                    rate_sample.is_app_limited = p.is_app_limited;
-                    rate_sample.tx_in_flight = p.tx_in_flight;
-                    rate_sample.lost = self.lost.saturating_sub(p.lost);
-                    rate_sample.send_elapsed = p.send_time - p.first_send_time;
-                    rate_sample.ack_elapsed = self.delivered_time.unwrap_or(now) - p.delivered_time;
-                    rate_sample.last_end_seq = packet_number;
-                    self.first_send_time = Some(p.send_time);
-                    rate_sample.last_packet = *p;
-                    self.rs = Some(rate_sample);
-                    self.update_model_and_state(rate_sample.last_packet, now);
-                    self.update_control_parameters();
-                    // Zero newly_acked after folding so each packet's bytes count once;
-                    // one ACK covers many packets and the model steps run per packet.
-                    if let Some(mut rate_sample) = self.rs {
-                        rate_sample.newly_acked = 0;
-                        self.rs = Some(rate_sample);
-                    }
-                }
-            } else {
-                let rate_sample = BbrRateSample {
-                    rtt: rtt.get(),
-                    interval: Duration::ZERO,
-                    delivery_rate: 0.0,
-                    is_app_limited: p.is_app_limited,
-                    delivered: 0,
-                    prior_delivered: p.delivered,
-                    tx_in_flight: p.tx_in_flight,
-                    send_elapsed: p.send_time - p.first_send_time,
-                    ack_elapsed: self.delivered_time.unwrap_or(now) - p.delivered_time,
-                    newly_acked: bytes,
-                    lost: self.lost.saturating_sub(p.lost),
-                    last_end_seq: packet_number,
-                    last_packet: *p,
-                };
-                self.rs = Some(rate_sample);
-                self.first_send_time = Some(p.send_time);
-                self.update_model_and_state(rate_sample.last_packet, now);
-                self.update_control_parameters();
-                // Drain newly_acked after folding, as in the branch above.
-                if let Some(mut rate_sample) = self.rs {
-                    rate_sample.newly_acked = 0;
-                    self.rs = Some(rate_sample);
-                }
-            }
-        }
+        self.rs_has_data = true;
+        self.first_send_time = Some(p.send_time);
+        self.rs = Some(BbrRateSample {
+            delivery_rate: 0.0,
+            is_app_limited: p.is_app_limited,
+            interval: Duration::ZERO,
+            delivered: 0,
+            prior_delivered: p.delivered,
+            send_elapsed: p.send_time - p.first_send_time,
+            ack_elapsed: now - p.delivered_time,
+            rtt: now - p.send_time,
+            tx_in_flight: p.tx_in_flight,
+            newly_acked: 0,
+            lost: self.lost.saturating_sub(p.lost),
+            last_end_seq: packet_number,
+            last_packet: p,
+        });
     }
 
-    /// equivalent to GenerateRateSample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
+    /// equivalent to GenerateRateSample, BBRUpdateModelAndState, and BBRUpdateControlParameters
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
     fn on_end_acks(
         &mut self,
-        _now: Instant,
+        now: Instant,
         in_flight: u64,
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
@@ -1755,25 +1732,30 @@ impl Bbr3 {
                     }
                 }
             }
-            if let Some(mut rate_sample) = self.rs {
-                rate_sample.interval = Ord::max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
-                rate_sample.delivered = self.delivered.saturating_sub(rate_sample.prior_delivered);
-                // ignore this condition on an initially high min rtt as per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1.2.3-5>
-                if rate_sample.interval < self.min_rtt
-                    && self.min_rtt != Duration::from_secs(u64::MAX)
-                {
-                    return;
-                }
-                if rate_sample.interval != Duration::ZERO {
-                    rate_sample.delivery_rate =
-                        rate_sample.delivered as f64 / rate_sample.interval.as_secs_f64();
-                }
-                self.rs = Some(rate_sample);
-                rate_sample.newly_acked = 0;
-                rate_sample.lost = 0;
-                self.rs = Some(rate_sample);
-            }
         }
+        let newly_acked = std::mem::take(&mut self.newly_acked);
+        // An ACK that delivered no tracked packet has no sample, and a finished one is never
+        // folded twice.
+        if !std::mem::take(&mut self.rs_has_data) {
+            return;
+        }
+        let Some(mut rs) = self.rs else {
+            return;
+        };
+        rs.newly_acked = newly_acked;
+        rs.interval = Ord::max(rs.send_elapsed, rs.ack_elapsed);
+        rs.delivered = self.delivered.saturating_sub(rs.prior_delivered);
+        // An interval shorter than the min RTT is not a reliable rate, but the sample still
+        // advances rounds and the state machine. The min RTT includes this ACK's own sample, as
+        // the transport's does in the draft, so an ACK that lowers the RTT still measures a rate.
+        // <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
+        let reliable = rs.interval >= Ord::min(self.min_rtt, rs.rtt);
+        if reliable && rs.interval != Duration::ZERO {
+            rs.delivery_rate = rs.delivered as f64 / rs.interval.as_secs_f64();
+        }
+        self.rs = Some(rs);
+        self.update_model_and_state(rs.last_packet, now);
+        self.update_control_parameters();
     }
 
     fn on_congestion_event(
@@ -2169,6 +2151,56 @@ mod test {
         /// Convert a simulator-nanosecond offset into an `Instant`.
         fn at(&self, off_ns: u64) -> Instant {
             self.base + Duration::from_nanos(off_ns)
+        }
+
+        /// Send `count` packets at `now_ns` outside the link model, for scripted tests that
+        /// choose each ACK with [`Self::ack`].
+        fn send(&mut self, now_ns: u64, count: u64) {
+            for _ in 0..count {
+                let now = self.at(now_ns);
+                self.bbr
+                    .on_packet_sent(now, self.mss as u16, self.pn, SpaceKind::Data);
+                self.inflight += self.mss;
+                self.flight.push_back(SimPacket {
+                    pn: self.pn,
+                    send_ns: now_ns,
+                    ack_ns: now_ns,
+                });
+                self.pn += 1;
+            }
+        }
+
+        /// Deliver one ACK frame at `now_ns` covering `pns`, as the transport does: one `on_ack`
+        /// per packet, then `on_end_acks` with the post-ACK inflight.
+        fn ack(&mut self, now_ns: u64, pns: impl IntoIterator<Item = u64>, app_limited: bool) {
+            let now = self.at(now_ns);
+            for pn in pns {
+                let i = self.flight.iter().position(|p| p.pn == pn).unwrap();
+                let p = self.flight.remove(i).unwrap();
+                self.inflight -= self.mss;
+                let sent = self.at(p.send_ns);
+                self.bbr.on_ack(
+                    now,
+                    sent,
+                    self.mss,
+                    pn,
+                    SpaceKind::Data,
+                    app_limited,
+                    &self.rtt_est,
+                );
+            }
+            // The transport reports the largest packet ever acked; only its presence matters.
+            self.bbr
+                .on_end_acks(now, self.inflight, app_limited, Some(0), SpaceKind::Data);
+        }
+
+        /// Declare packet `pn` lost at `now_ns`, outside any ACK.
+        fn lose(&mut self, now_ns: u64, pn: u64) {
+            let i = self.flight.iter().position(|p| p.pn == pn).unwrap();
+            self.flight.remove(i);
+            self.inflight -= self.mss;
+            self.bbr
+                .on_packet_lost(self.mss as u16, pn, SpaceKind::Data, self.at(now_ns));
         }
 
         /// Drive the send/ack loop for up to `max_iters` steps. On each step the
@@ -6900,10 +6932,9 @@ mod test {
                 inflight -= MSS;
                 rtt_est.update(Duration::ZERO, Duration::from_nanos(now_ns - p.send_ns));
 
-                // update_max_bw runs inside on_ack, on the sample already pending from
-                // the previous on_end_acks. Snapshot max_bw and state around on_ack, and
-                // read that sample (bbr.rs) between on_ack and on_end_acks: that is
-                // exactly what update_max_bw's guard consumed.
+                // update_max_bw runs inside on_end_acks, on the sample this ACK completed.
+                // Snapshot max_bw and state around the ACK and read that sample (bbr.rs)
+                // after it: that is exactly what update_max_bw's guard consumed.
                 let state_before = bbr.state;
                 let max_bw_before = bbr.max_bw;
                 bbr.on_ack(
@@ -6915,9 +6946,6 @@ mod test {
                     app_limited_phase,
                     &rtt_est,
                 );
-                let max_bw_after = bbr.max_bw;
-                let state_after = bbr.state;
-                let sample = bbr.rs;
                 bbr.on_end_acks(
                     at(now_ns),
                     inflight,
@@ -6925,6 +6953,9 @@ mod test {
                     Some(p.pn),
                     SpaceKind::Data,
                 );
+                let max_bw_after = bbr.max_bw;
+                let state_after = bbr.state;
+                let sample = bbr.rs;
 
                 // Flip to the application-limited phase the moment PROBE_BW is entered,
                 // so the pipe drains to APP_WINDOW during PROBE_DOWN and the first
@@ -7043,6 +7074,130 @@ mod test {
             "max_bw after subsequent probing ({max_bw_final}) should still be within 10% of the \
              simulated {BW} (rel err {final_err})"
         );
+    }
+
+    /// One millisecond in simulator nanoseconds, for the scripted ACK sampling tests.
+    const MS: u64 = 1_000_000;
+
+    /// A scripted `Sim` with 1200-byte packets; the link parameters are unused.
+    fn scripted() -> Sim {
+        Sim::new(Bbr3Config::default(), 1200, 1e6, 10 * MS)
+    }
+
+    /// The first ACK's sample reaches the model: 1200 bytes in 10ms is 120 KB/s.
+    #[test]
+    fn first_ack_sample_reaches_max_bw() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], false);
+        assert_eq!(sim.bbr.max_bw, 120_000.0);
+    }
+
+    /// An application-limited sample keeps its label when the next ACK carries a non-limited
+    /// burst, so it cannot replace an aged maximum; the burst's own rate does.
+    #[test]
+    fn app_limited_sample_keeps_its_label() {
+        let mut sim = scripted();
+        // A 10 MB/s maximum whose filter window has passed.
+        sim.bbr.max_bw_filter.update_max(0, 10_000_000);
+        sim.bbr.max_bw = 10_000_000.0;
+        sim.bbr.cycle_count = MAX_BW_FILTER_LEN as u64 + 1;
+        // The application ran dry before packet 0.
+        sim.bbr.app_limited = 1;
+
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], false);
+        let rs = sim.bbr.rs.unwrap();
+        assert!(rs.is_app_limited);
+        assert_eq!(rs.delivery_rate.round(), 120_000.0);
+        assert_eq!(sim.bbr.max_bw, 10_000_000.0);
+
+        sim.send(10 * MS, 10);
+        sim.ack(20 * MS, 1..=10, false);
+        assert!(!sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.max_bw, 1_200_000.0);
+    }
+
+    /// A batched ACK updates the model once, after inflight drops: DRAIN ends on the ACK that
+    /// empties the pipe.
+    #[test]
+    fn batched_ack_sees_post_ack_inflight() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], false);
+        sim.bbr.enter_drain();
+
+        // 60 KB in flight, far above one BDP plus the quantization budget.
+        sim.send(10 * MS, 50);
+        sim.ack(20 * MS, 1..=50, false);
+        assert_eq!(sim.bbr.inflight, 0);
+        assert!(matches!(sim.bbr.state, BbrState::ProbeBw(_)));
+    }
+
+    /// A late ACK for an older packet samples that packet, not the previous ACK's.
+    #[test]
+    fn reordered_ack_samples_its_own_packet() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.send(MS, 1);
+        sim.ack(10 * MS, [1], false);
+        assert_eq!(sim.bbr.max_bw, 120_000.0);
+
+        // Packet 0 delivered 2400 bytes since it was sent, 12ms ago.
+        sim.ack(12 * MS, [0], false);
+        assert_eq!(sim.bbr.rs.unwrap().last_packet.packet_number, 0);
+        assert_eq!(sim.bbr.max_bw, 200_000.0);
+    }
+
+    /// An interval shorter than the previous min RTT counts when this ACK lowers the RTT, and a
+    /// zero interval carries no bandwidth rather than the previous sample's.
+    #[test]
+    fn short_intervals() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], false);
+        assert_eq!(sim.bbr.min_rtt, Duration::from_millis(10));
+
+        sim.send(10 * MS, 1);
+        sim.ack(15 * MS, [1], false);
+        assert_eq!(sim.bbr.max_bw, 240_000.0);
+
+        sim.send(15 * MS, 1);
+        sim.ack(15 * MS, [2], false);
+        let rs = sim.bbr.rs.unwrap();
+        assert_eq!(rs.last_packet.packet_number, 2);
+        assert_eq!(rs.delivery_rate, 0.0);
+        assert_eq!(sim.bbr.max_bw, 240_000.0);
+    }
+
+    /// Neither a loss nor an ACK that delivers no tracked packet folds the last sample again.
+    #[test]
+    fn loss_only_event_reuses_no_sample() {
+        let mut sim = scripted();
+        sim.send(0, 2);
+        sim.ack(10 * MS, [0], false);
+        let round_count = sim.bbr.round_count;
+
+        sim.lose(12 * MS, 1);
+        sim.ack(15 * MS, [], false);
+        assert_eq!(sim.bbr.round_count, round_count);
+        assert_eq!(sim.bbr.max_bw, 120_000.0);
+    }
+
+    /// After an idle period, the first ACK measures the resumed burst, not the pre-idle sample.
+    #[test]
+    fn idle_restart_samples_the_resumed_burst() {
+        let mut sim = scripted();
+        sim.send(0, 1);
+        sim.ack(10 * MS, [0], true);
+        assert_eq!(sim.bbr.max_bw, 120_000.0);
+
+        sim.send(1000 * MS, 10);
+        assert!(sim.bbr.idle_restart);
+        sim.ack(1010 * MS, 1..=10, false);
+        let rs = sim.bbr.rs.unwrap();
+        assert!(rs.is_app_limited);
+        assert_eq!(sim.bbr.max_bw, 1_200_000.0);
     }
 
     /// Packet size for the packet identity tests.
