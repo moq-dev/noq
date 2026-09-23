@@ -177,6 +177,8 @@ enum BbrState {
 /// equivalent to BBR.ack_phase states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum AckPhase {
+    /// equivalent to ACKS_INIT
+    Init,
     /// equivalent to ACKS_PROBE_STARTING
     ProbeStarting,
     /// equivalent to ACKS_PROBE_STOPPING
@@ -691,7 +693,7 @@ impl Bbr3 {
             bw_probe_up_acks: 0,
             probe_up_cnt: 0,
             cycle_stamp: None,
-            ack_phase: AckPhase::ProbeStarting,
+            ack_phase: AckPhase::Init,
             bw_probe_samples: false,
             loss_events_in_round: 0,
             last_lost_packet: None,
@@ -996,18 +998,23 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    ///
+    /// The probe's feedback ends once, on the first round after it stops, so later losses are not
+    /// taken as probe feedback and later rounds do not age the max-bw window again.
     fn adapt_long_term_model(&mut self) {
         if self.ack_phase == AckPhase::ProbeStarting && self.round_start {
             self.ack_phase = AckPhase::ProbeFeedback;
         }
-        if self.ack_phase == AckPhase::ProbeStopping
-            && self.round_start
-            && let BbrState::ProbeBw(_) = self.state
-            && let Some(rate_sample) = self.rs
-            && !rate_sample.is_app_limited
-        {
-            self.advance_max_bw_filter();
+        if self.ack_phase == AckPhase::ProbeStopping && self.round_start {
+            self.bw_probe_samples = false;
+            self.ack_phase = AckPhase::Init;
+            if let BbrState::ProbeBw(_) = self.state
+                && let Some(rate_sample) = self.rs
+                && !rate_sample.is_app_limited
+            {
+                self.advance_max_bw_filter();
+            }
         }
         if !self.is_inflight_too_high() {
             if self.inflight_longterm == u64::MAX {
@@ -2204,6 +2211,14 @@ mod test {
             // The transport reports the largest packet ever acked; only its presence matters.
             self.bbr
                 .on_end_acks(now, self.inflight, app_limited, Some(0), SpaceKind::Data);
+        }
+
+        /// Send `count` packets at `now_ns` and acknowledge them in one ACK `rtt_ns` later: one
+        /// round when nothing else is in flight.
+        fn round(&mut self, now_ns: u64, count: u64, rtt_ns: u64) {
+            let first = self.pn;
+            self.send(now_ns, count);
+            self.ack(now_ns + rtt_ns, first..self.pn, false);
         }
 
         /// Report an empty transmit poll that nothing held back, as the transport does.
@@ -7256,6 +7271,94 @@ mod test {
         sim.ack(22 * MS, [2, 3, 4], false);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.app_limited, 0);
+    }
+
+    /// A scripted `Sim` in PROBE_DOWN after a loss-free probe measured 12 MB/s over a 10ms RTT,
+    /// a 100-packet BDP, with the probe's feedback still arriving.
+    fn probed() -> Sim {
+        let mut sim = scripted();
+        sim.round(0, 100, 10 * MS);
+        sim.bbr.full_bw_reached = true;
+        sim.bbr.bw_probe_samples = true;
+        sim.bbr.enter_probe_bw(sim.at(10 * MS));
+        sim
+    }
+
+    /// Finishing a probe ages the max-bw window once, so cruise rounds keep the probe's maximum,
+    /// and a later cruise loss cuts only the short-term model.
+    #[test]
+    fn probe_feedback_finishes_once() {
+        let mut sim = probed();
+        let cycle = sim.bbr.cycle_count;
+        // Cruise at half the probed rate for longer than the filter window.
+        for i in 0..5 {
+            sim.round(10 * MS + i * 20 * MS, 100, 20 * MS);
+        }
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
+        assert_eq!(sim.bbr.cycle_count, cycle + 1);
+        assert_eq!(sim.bbr.max_bw, 12_000_000.0);
+        assert!(!sim.bbr.bw_probe_samples);
+
+        // Lose 10% of the next round.
+        let first = sim.pn;
+        sim.send(110 * MS, 100);
+        for pn in first..first + 10 {
+            sim.lose(130 * MS, pn);
+        }
+        sim.ack(130 * MS, first + 10..sim.pn, false);
+        assert_eq!(sim.bbr.inflight_longterm, u64::MAX);
+        assert!(sim.bbr.bw_shortterm < f64::INFINITY);
+    }
+
+    /// Probe feedback that ends on an application-limited round finishes without aging the
+    /// window, and later rounds do not finish it again.
+    #[test]
+    fn app_limited_probe_feedback_finishes_once() {
+        let mut sim = probed();
+        let cycle = sim.bbr.cycle_count;
+        sim.starve();
+        sim.round(10 * MS, 100, 20 * MS);
+        assert!(sim.bbr.rs.unwrap().is_app_limited);
+        assert!(!sim.bbr.bw_probe_samples);
+
+        for i in 1..5 {
+            sim.round(10 * MS + i * 20 * MS, 100, 20 * MS);
+        }
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
+        assert_eq!(sim.bbr.cycle_count, cycle);
+        assert_eq!(sim.bbr.max_bw, 12_000_000.0);
+    }
+
+    /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on the first
+    /// round after ProbeRTT returns to cruising.
+    #[test]
+    fn probe_rtt_finishes_probe_feedback_once() {
+        let mut sim = probed();
+        sim.bbr.start_probe_bw_up();
+        sim.round(10 * MS, 100, 10 * MS);
+        assert_eq!(sim.bbr.ack_phase, AckPhase::ProbeFeedback);
+        let cycle = sim.bbr.cycle_count;
+
+        // The min RTT expires on the next round.
+        sim.bbr.probe_rtt_interval = Duration::ZERO;
+        sim.round(20 * MS, 100, 10 * MS);
+        sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+
+        let mut now = 30 * MS;
+        while sim.bbr.state == BbrState::ProbeRtt {
+            sim.round(now, 100, 10 * MS);
+            now += 10 * MS;
+            assert!(now < 1000 * MS, "ProbeRTT never ended");
+        }
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
+        assert_eq!(sim.bbr.cycle_count, cycle);
+        assert!(!sim.bbr.bw_probe_samples);
+
+        for i in 0..5 {
+            sim.round(now + i * 10 * MS, 100, 10 * MS);
+        }
+        assert_eq!(sim.bbr.cycle_count, cycle + 1);
     }
 
     /// Packet size for the packet identity tests.
