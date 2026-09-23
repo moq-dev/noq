@@ -52,6 +52,14 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     /// the congestion window at this point in the current round trip.
     fn on_cwnd_limited(&mut self) {}
 
+    /// The connection had nothing to send, and neither the controller nor the path held it back
+    ///
+    /// Reported on every such transmit poll, so a controller learns of starvation before the next
+    /// send rather than at the next ACK. `in_flight` is the path's bytes in flight at that point.
+    /// Data blocked on the peer's flow control credit counts as nothing to send.
+    #[allow(unused_variables)]
+    fn on_app_limited(&mut self, in_flight: u64) {}
+
     /// Packet deliveries were confirmed
     ///
     /// `app_limited` indicates whether the connection was blocked on outgoing
