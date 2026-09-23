@@ -1659,7 +1659,12 @@ impl Bbr3 {
     }
 
     /// equivalent to MarkConnectionAppLimited <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
+    ///
+    /// A full window means the connection is window-limited, not starved, so it marks nothing.
     fn on_app_limited(&mut self, in_flight: u64) {
+        if in_flight >= self.cwnd {
+            return;
+        }
         self.app_limited = Ord::max(self.delivered + in_flight, 1);
     }
 
@@ -7231,6 +7236,15 @@ mod test {
         assert!(sim.bbr.idle_restart);
         sim.ack(40 * MS, [1], false);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.app_limited, 0);
+    }
+
+    /// An empty poll with the window full is window-limited, not starved.
+    #[test]
+    fn full_window_is_not_starvation() {
+        let mut sim = scripted();
+        sim.send(0, sim.bbr.cwnd.div_ceil(1200));
+        sim.starve();
         assert_eq!(sim.bbr.app_limited, 0);
     }
 
