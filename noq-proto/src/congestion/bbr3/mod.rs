@@ -7478,10 +7478,10 @@ mod test {
             sim.send(now, 4);
             assert!(newest_limited(&sim));
             sim.ack(now, first..first + 4, false);
+            assert_eq!(sim.bbr.max_bw, 12_000_000.0);
             assert!(now < 1000 * MS, "ProbeRTT never ended");
         }
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
-        assert_eq!(sim.bbr.max_bw, 12_000_000.0);
 
         // The last batch sent during ProbeRTT delivers after it ends.
         now += 10 * MS;
