@@ -5778,8 +5778,8 @@ mod test {
     ///     being delivered while these earlier ones look missing. Feed them one at a time until the
     ///     accumulated loss trips `is_inflight_too_high` (> `LOSS_THRESH` of tx_in_flight): that
     ///     runs `handle_inflight_too_high`, which clamps `inflight_longterm` to a finite value and
-    ///     moves PROBE_UP -> PROBE_DOWN and sets `undo_state` = PROBE_UP. Stop declaring losses
-    ///     the instant the state leaves PROBE_UP.
+    ///     moves PROBE_UP -> PROBE_DOWN and sets `undo_state` = PROBE_UP. Stop declaring losses the
+    ///     instant the state leaves PROBE_UP.
     ///  3. The transport detects the loss was spurious -> `on_spurious_congestion_event`.
     ///
     /// Asserts:
@@ -6040,11 +6040,11 @@ mod test {
     ///
     /// Both recovery kinds reach BBR through the same loss path: the connection layer calls
     /// `on_packet_lost` per timed-out packet, which runs `process_lost_packet` ->
-    /// `enter_recovery` -> `save_state_upon_loss` on the first. (bbr3's `on_congestion_event` only acts on ECN, so a non-ECN RTO /
-    /// persistent-congestion batch reaches BBR purely as these per-packet losses; see the trait
-    /// note on `on_congestion_event`.) The RTO character here is the *shape* of the loss: a
-    /// single tail burst with no interleaved deliveries, i.e. a timeout, not a SACK-driven Fast
-    /// Recovery.
+    /// `enter_recovery` -> `save_state_upon_loss` on the first. (bbr3's `on_congestion_event` only
+    /// acts on ECN, so a non-ECN RTO / persistent-congestion batch reaches BBR purely as these
+    /// per-packet losses; see the trait note on `on_congestion_event`.) The RTO character here
+    /// is the *shape* of the loss: a single tail burst with no interleaved deliveries, i.e. a
+    /// timeout, not a SACK-driven Fast Recovery.
     ///
     /// The timeout is introduced while the flow is in PROBE_UP:
     ///  1. Reach PROBE_UP loss-free with a full window outstanding, so the short-term model is at
