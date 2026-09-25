@@ -329,7 +329,7 @@ impl PacketNumberSpace {
     }
 
     #[cfg(test)]
-    fn new_deterministic(now: Instant, space: SpaceId) -> Self {
+    pub(super) fn new_deterministic(now: Instant, space: SpaceId) -> Self {
         let pn_filter = match space {
             SpaceId::Initial | SpaceId::Handshake => None,
             SpaceId::Data => Some(PacketNumberFilter::disabled()),
