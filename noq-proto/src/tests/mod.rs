@@ -4621,17 +4621,6 @@ impl Controller for PacingOnlyController {
         self.cwnd_limited_reports.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-    ) {
-    }
-
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
     fn window(&self) -> u64 {
@@ -4715,17 +4704,6 @@ struct FixedQuantumController {
 }
 
 impl Controller for FixedQuantumController {
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-    ) {
-    }
-
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
     fn window(&self) -> u64 {
@@ -4807,21 +4785,35 @@ fn send_quantum_bounds_the_gso_batch() {
 /// A congestion callback, as the transport reported it.
 #[derive(Debug, Clone, Copy)]
 enum PacketEvent {
-    Sent { at: Instant, packet: PacketId },
-    Acked { sent: Instant, packet: PacketId },
-    Lost { packet: PacketId },
-    Congestion { largest: PacketId, ecn: bool },
-    AppLimited { in_flight: u64 },
+    Sent {
+        at: Instant,
+        packet: PacketId,
+    },
+    Acked {
+        sent: Instant,
+        packet: PacketId,
+    },
+    Lost {
+        packet: PacketId,
+    },
+    Congestion {
+        sent: Instant,
+        largest: PacketId,
+        ecn: bool,
+    },
+    AppLimited {
+        in_flight: u64,
+    },
 }
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
 
-/// Records the packet-identity and starvation callbacks and fails on the pn-only ones the
-/// transport replaced.
+/// Records the per-packet and starvation callbacks.
 #[derive(Debug, Clone)]
 struct PacketRecorder {
     log: PacketLog,
     window: u64,
+    pacing_rate: Option<u64>,
 }
 
 impl PacketRecorder {
@@ -4854,13 +4846,14 @@ impl Controller for PacketRecorder {
     fn on_congestion_event_space(
         &mut self,
         _now: Instant,
-        _sent: Instant,
+        sent: Instant,
         _is_persistent_congestion: bool,
         is_ecn: bool,
         _lost_bytes: u64,
         largest_lost: PacketId,
     ) {
         self.push(PacketEvent::Congestion {
+            sent,
             largest: largest_lost,
             ecn: is_ecn,
         });
@@ -4870,42 +4863,19 @@ impl Controller for PacketRecorder {
         self.push(PacketEvent::AppLimited { in_flight });
     }
 
-    fn on_packet_sent(&mut self, _now: Instant, _bytes: u16, _pn: u64) {
-        panic!("transport called the pn-only on_packet_sent");
-    }
-
-    fn on_ack(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _bytes: u64,
-        _pn: u64,
-        _app_limited: bool,
-        _rtt: &RttEstimator,
-    ) {
-        panic!("transport called the pn-only on_ack");
-    }
-
-    fn on_packet_lost(&mut self, _lost_bytes: u16, _pn: u64, _now: Instant) {
-        panic!("transport called the pn-only on_packet_lost");
-    }
-
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost_pn: u64,
-    ) {
-        panic!("transport called the pn-only on_congestion_event");
-    }
-
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
     fn window(&self) -> u64 {
         self.window
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window,
+            ssthresh: None,
+            pacing_rate: self.pacing_rate,
+            send_quantum: None,
+        }
     }
 
     fn clone_box(&self) -> Box<dyn Controller> {
@@ -4927,6 +4897,8 @@ struct PacketRecorderFactory {
     logs: Mutex<Vec<PacketLog>>,
     /// The congestion window every controller reports; effectively unlimited if unset
     window: Option<u64>,
+    /// The pacing rate in bytes/sec every controller reports; derived from the window if unset
+    pacing_rate: Option<u64>,
 }
 
 impl ControllerFactory for PacketRecorderFactory {
@@ -4936,17 +4908,20 @@ impl ControllerFactory for PacketRecorderFactory {
         Box::new(PacketRecorder {
             log,
             window: self.window.unwrap_or(u64::MAX / 2),
+            pacing_rate: self.pacing_rate,
         })
     }
 }
 
 /// Asserts every ACK, loss, and congestion event in one controller's log names a packet that
-/// controller sent, with the ACK carrying that packet's own send time, and no packet is resolved
-/// twice. Returns the log for scenario-specific checks.
+/// controller sent, ACKs and congestion events carry that packet's own send time, a loss-driven
+/// congestion event ends with a packet just reported lost, and no packet is resolved twice.
+/// Returns the log for scenario-specific checks.
 fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
     let events = log.lock().unwrap().clone();
     let mut sent = HashMap::new();
     let mut resolved = HashSet::new();
+    let mut lost = HashSet::new();
     for event in &events {
         match *event {
             PacketEvent::Sent { at, packet } => {
@@ -4963,11 +4938,21 @@ fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
             PacketEvent::Lost { packet } => {
                 assert!(sent.contains_key(&packet), "{packet:?} lost but never sent");
                 assert!(resolved.insert(packet), "{packet:?} resolved twice");
+                lost.insert(packet);
             }
-            PacketEvent::Congestion { largest, .. } => {
+            PacketEvent::Congestion {
+                sent: at,
+                largest,
+                ecn,
+            } => {
+                assert_eq!(
+                    sent.get(&largest),
+                    Some(&at),
+                    "{largest:?} congested with another send time"
+                );
                 assert!(
-                    sent.contains_key(&largest),
-                    "{largest:?} congested but never sent"
+                    ecn || lost.contains(&largest),
+                    "{largest:?} congested but not lost"
                 );
             }
             PacketEvent::AppLimited { .. } => {}
@@ -5049,18 +5034,21 @@ fn congestion_callbacks_identify_packets_across_spaces() {
     );
     assert!(
         events.iter().any(
-            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true } if largest.space != Space::Data)
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: false, .. } if largest.space != Space::Data)
+        ),
+        "no handshake loss congestion reported"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true, .. } if largest.space != Space::Data)
         ),
         "no handshake ECN congestion reported"
     );
 }
 
 /// Connects a pair whose controllers record their callbacks, returning the client's log.
-fn recorded_pair(window: Option<u64>) -> (Pair, ConnectionHandle, PacketLog) {
-    let factory = Arc::new(PacketRecorderFactory {
-        window,
-        ..Default::default()
-    });
+fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, PacketLog) {
+    let factory = Arc::new(factory);
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(factory.clone());
     let transport = Arc::new(transport);
@@ -5082,7 +5070,7 @@ fn recorded_pair(window: Option<u64>) -> (Pair, ConnectionHandle, PacketLog) {
 /// the controller of starvation before the resumed send.
 fn check_starvation_reported_before_resumed_send(send: impl Fn(&mut Pair, ConnectionHandle)) {
     let _guard = subscribe();
-    let (mut pair, client_ch, log) = recorded_pair(None);
+    let (mut pair, client_ch, log) = recorded_pair(Default::default());
     send(&mut pair, client_ch);
     pair.drive();
 
@@ -5122,11 +5110,15 @@ fn datagram_starvation_reported_before_resumed_send() {
     });
 }
 
-/// A backlog held back by the congestion window or the pacer is not starvation.
-#[test]
-fn blocked_backlog_is_not_app_limited() {
+/// Writes a backlog that `factory`'s controllers hold back, and checks it never reports
+/// starvation.
+fn check_blocked_backlog_is_not_app_limited(factory: PacketRecorderFactory) {
     let _guard = subscribe();
-    let (mut pair, client_ch, log) = recorded_pair(Some(12_000));
+    let (mut pair, client_ch, log) = recorded_pair(factory);
+    // The handshake can drain the pacer, and how far depends on its random sizes. Refill it so
+    // the backlog always starts sending before it is held back.
+    pair.time += Duration::from_millis(100);
+    pair.drive();
     let before = log.lock().unwrap().len();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
@@ -5142,6 +5134,52 @@ fn blocked_backlog_is_not_app_limited() {
             .iter()
             .any(|e| matches!(e, PacketEvent::AppLimited { .. })),
         "a blocked backlog reported starvation"
+    );
+}
+
+#[test]
+fn window_blocked_backlog_is_not_app_limited() {
+    check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+        window: Some(12_000),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn pacing_blocked_backlog_is_not_app_limited() {
+    // 1 Mbit/s holds the backlog back long before the unlimited window fills.
+    check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+        pacing_rate: Some(125_000),
+        ..Default::default()
+    });
+}
+
+/// A Retry acknowledges the client's first Initial packet without an ACK frame. That inferred
+/// ACK must name Initial 0 too, not packet 0 of another space.
+#[test]
+fn congestion_callbacks_identify_the_initial_a_retry_acks() {
+    let _guard = subscribe();
+    let factory = Arc::new(PacketRecorderFactory::default());
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(factory.clone());
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    pair.server.handle_incoming = Box::new(validate_incoming);
+    pair.connect_with(client_cfg);
+
+    let logs = factory.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 1, "only the client records");
+    let initial_0 = PacketId {
+        space: Space::Initial,
+        number: 0,
+    };
+    assert!(
+        check_packet_identity(&logs[0])
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if *packet == initial_0)),
+        "the Retry did not ack Initial 0"
     );
 }
 

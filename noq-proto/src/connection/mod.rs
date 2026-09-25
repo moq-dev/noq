@@ -994,6 +994,12 @@ impl Connection {
 
         let path = vacant_entry.insert(PathState { data, prev: None });
 
+        #[cfg(test)]
+        let mut pn_space = match self.config.deterministic_packet_numbers {
+            true => spaces::PacketNumberSpace::new_deterministic(now, SpaceId::Data),
+            false => spaces::PacketNumberSpace::new(now, SpaceId::Data, &mut self.rng),
+        };
+        #[cfg(not(test))]
         let mut pn_space = spaces::PacketNumberSpace::new(now, SpaceId::Data, &mut self.rng);
         if let Some(pn) = pn {
             pn_space.dedup.insert(pn);
