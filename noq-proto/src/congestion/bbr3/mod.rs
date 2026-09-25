@@ -174,7 +174,7 @@ enum BbrState {
 }
 
 /// Ack phases used during ProbeBW states
-/// equivalent to BBR.ack_phase states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6>
+/// equivalent to BBR.ack_phase states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.14>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum AckPhase {
     /// equivalent to ACKS_INIT
@@ -260,9 +260,6 @@ struct BbrRateSample {
     /// that has just been ACKed (the most recently sent packet among packets ACKed by the ACK
     /// that was just received).
     tx_in_flight: u64,
-    /// equivalent to RS.newly_acked: The volume of data in bytes cumulatively or selectively
-    /// acknowledged upon the ACK that was just received.
-    newly_acked: u64,
     /// equivalent to RS.lost: The volume of data in bytes that was declared lost between the
     /// transmission and acknowledgment of the packet that has just been ACKed (the most
     /// recently sent packet among packets ACKed by the ACK that was just received).
@@ -516,7 +513,8 @@ pub struct Bbr3 {
     /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
     /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
     rs_has_data: bool,
-    /// equivalent to RS.newly_acked, accumulated over the ACK being processed.
+    /// equivalent to RS.newly_acked, accumulated over the ACK being processed. It is passed to
+    /// the ACK's model steps rather than kept in `rs`, so no later `set_cwnd` counts it again.
     newly_acked: u64,
     /// equivalent to BBR.rounds_since_bw_probe: rounds since last bw probe state.
     rounds_since_bw_probe: u64,
@@ -525,17 +523,16 @@ pub struct Bbr3 {
     /// equivalent to BBR.bw_probe_up_rounds: number of rounds that have been executed in probe up
     /// state
     bw_probe_up_rounds: u32,
-    /// equivalent to BBR.bw_probe_up_acks: volume of data in bytes that has been acknowledged
-    /// during probe up state
-    bw_probe_up_acks: u64,
+    /// equivalent to BBR.bw_probe_up_acked: bytes acknowledged since `inflight_longterm` last grew
+    bw_probe_up_acked: u64,
     /// equivalent to BBR.probe_up_acked_per_inc: bytes to acknowledge per SMSS of
     /// `inflight_longterm` growth during probe up state
-    probe_up_cnt: u64,
+    probe_up_acked_per_inc: u64,
     /// equivalent to BBR.cycle_stamp: timestamp when we start probing down state
     cycle_stamp: Option<Instant>,
     /// equivalent to BBR.ack_phase: ACK phase during probing states
     ack_phase: AckPhase,
-    /// equivalent to BBR.bw_probe_samples: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2>
+    /// equivalent to BBR.is_bw_probe_sample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.14>
     bw_probe_samples: bool,
     /// equivalent to BBR.loss_round_delivered: C.delivered during the first loss of the round
     loss_round_delivered: u64,
@@ -695,8 +692,8 @@ impl Bbr3 {
             rounds_since_bw_probe: 0,
             bw_probe_wait: Duration::ZERO,
             bw_probe_up_rounds: 0,
-            bw_probe_up_acks: 0,
-            probe_up_cnt: 0,
+            bw_probe_up_acked: 0,
+            probe_up_acked_per_inc: 0,
             cycle_stamp: None,
             ack_phase: AckPhase::Init,
             bw_probe_samples: false,
@@ -722,14 +719,14 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
-    fn update_model_and_state(&mut self, p: BbrPacket, now: Instant) {
+    fn update_model_and_state(&mut self, p: BbrPacket, newly_acked: u64, now: Instant) {
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
-        self.update_ack_aggregation(now);
+        self.update_ack_aggregation(newly_acked, now);
         self.check_full_bw_reached();
         self.check_startup_done();
         self.check_drain_done(now);
-        self.update_probe_bw_cycle_phase(now);
+        self.update_probe_bw_cycle_phase(newly_acked, now);
         self.update_min_rtt(now);
         self.check_probe_rtt(now);
         self.advance_latest_delivery_signals();
@@ -832,7 +829,7 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateACKAggregation <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.9>
-    fn update_ack_aggregation(&mut self, now: Instant) {
+    fn update_ack_aggregation(&mut self, newly_acked: u64, now: Instant) {
         let interval;
         if let Some(extra_acked_interval_start) = self.extra_acked_interval_start {
             interval = now - extra_acked_interval_start;
@@ -845,9 +842,7 @@ impl Bbr3 {
             self.extra_acked_interval_start = Some(now);
             expected_delivered = 0;
         }
-        if let Some(rate_sample) = self.rs {
-            self.extra_acked_delivered += rate_sample.newly_acked;
-        }
+        self.extra_acked_delivered += newly_acked;
 
         let mut extra = self
             .extra_acked_delivered
@@ -975,11 +970,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateProbeBWCyclePhase <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-6>
-    fn update_probe_bw_cycle_phase(&mut self, now: Instant) {
+    fn update_probe_bw_cycle_phase(&mut self, newly_acked: u64, now: Instant) {
         if !self.full_bw_reached {
             return;
         }
-        self.adapt_long_term_model();
+        self.adapt_long_term_model(newly_acked);
         let state = self.state;
         match state {
             BbrState::ProbeBw(ProbeBwSubstate::Down) => {
@@ -1003,11 +998,11 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// The probe's feedback ends once, on the first round after it stops, so later losses are not
     /// taken as probe feedback and later rounds do not age the max-bw window again.
-    fn adapt_long_term_model(&mut self) {
+    fn adapt_long_term_model(&mut self, newly_acked: u64) {
         if self.ack_phase == AckPhase::ProbeStarting && self.round_start {
             self.ack_phase = AckPhase::ProbeFeedback;
         }
@@ -1031,7 +1026,7 @@ impl Bbr3 {
                 self.inflight_longterm = rate_sample.tx_in_flight;
             }
             if self.state == BbrState::ProbeBw(ProbeBwSubstate::Up) {
-                self.probe_inflight_long_term_upward();
+                self.probe_inflight_long_term_upward(newly_acked);
             }
         }
     }
@@ -1081,7 +1076,7 @@ impl Bbr3 {
     fn start_probe_bw_refill(&mut self) {
         self.reset_short_term_model();
         self.bw_probe_up_rounds = 0;
-        self.bw_probe_up_acks = 0;
+        self.bw_probe_up_acked = 0;
         self.ack_phase = AckPhase::Refilling;
         self.start_round();
         self.cwnd_gain = self.default_cwnd_gain;
@@ -1119,20 +1114,21 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// Growing in whole packets lets the cwnd catch up between increments, so PROBE_UP sees the
-    /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it.
-    fn probe_inflight_long_term_upward(&mut self) {
+    /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it. Once
+    /// `probe_up_acked_per_inc` falls to its SMSS floor, each ACK grows the bound before the cwnd
+    /// follows, so late rounds no longer reset the plateau check. The draft and Linux do the same.
+    fn probe_inflight_long_term_upward(&mut self, newly_acked: u64) {
         if !self.is_cwnd_limited || self.cwnd < self.inflight_longterm {
             return;
         }
-        if let Some(rate_sample) = self.rs {
-            self.bw_probe_up_acks += rate_sample.newly_acked;
-        }
-        if self.bw_probe_up_acks >= self.probe_up_cnt && self.probe_up_cnt > 0 {
-            let delta = self.bw_probe_up_acks / self.probe_up_cnt;
-            self.bw_probe_up_acks -= delta * self.probe_up_cnt;
+        self.bw_probe_up_acked += newly_acked;
+        if self.bw_probe_up_acked >= self.probe_up_acked_per_inc && self.probe_up_acked_per_inc > 0
+        {
+            let delta = self.bw_probe_up_acked / self.probe_up_acked_per_inc;
+            self.bw_probe_up_acked -= delta * self.probe_up_acked_per_inc;
             self.inflight_longterm += delta * self.smss;
         }
         if self.round_start {
@@ -1275,14 +1271,14 @@ impl Bbr3 {
         self.full_bw_now = false;
     }
 
-    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     fn raise_inflight_long_term_slope(&mut self) {
         let growth_this_round = 1u64
             .checked_shl(self.bw_probe_up_rounds)
             .unwrap_or(u64::MAX);
         self.bw_probe_up_rounds =
             Ord::min(self.bw_probe_up_rounds + 1, MAX_LONG_TERM_PROBE_UP_ROUNDS);
-        self.probe_up_cnt = Ord::max(self.cwnd / growth_this_round, self.smss);
+        self.probe_up_acked_per_inc = Ord::max(self.cwnd / growth_this_round, self.smss);
     }
 
     /// equivalent to BBRHandleRestartFromIdle <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.4.1>
@@ -1344,25 +1340,19 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateControlParameters <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
-    fn update_control_parameters(&mut self) {
+    fn update_control_parameters(&mut self, newly_acked: u64) {
         self.set_pacing_rate();
         self.set_send_quantum();
-        self.set_cwnd();
+        self.set_cwnd(newly_acked);
     }
 
     /// equivalent to BBRSetCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.6>
-    fn set_cwnd(&mut self) {
+    fn set_cwnd(&mut self, newly_acked: u64) {
         self.update_max_inflight();
         if self.full_bw_reached {
-            if let Some(rate_sample) = self.rs {
-                self.cwnd = Ord::min(self.cwnd + rate_sample.newly_acked, self.max_inflight);
-            } else {
-                self.cwnd = Ord::min(self.cwnd, self.max_inflight);
-            }
-        } else if (self.cwnd < self.max_inflight || self.delivered < self.initial_cwnd)
-            && let Some(rate_sample) = self.rs
-        {
-            self.cwnd += rate_sample.newly_acked;
+            self.cwnd = Ord::min(self.cwnd + newly_acked, self.max_inflight);
+        } else if self.cwnd < self.max_inflight || self.delivered < self.initial_cwnd {
+            self.cwnd += newly_acked;
         }
         self.cwnd = Ord::max(self.cwnd, self.min_pipe_cwnd);
         self.bound_cwnd_for_probe_rtt();
@@ -1623,7 +1613,7 @@ impl Bbr3 {
     /// equivalent to BBRStartProbeBW_DOWN <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-4>
     fn start_probe_bw_down(&mut self, now: Instant) {
         self.reset_congestion_signals();
-        self.probe_up_cnt = u64::MAX;
+        self.probe_up_acked_per_inc = u64::MAX;
         self.pick_probe_wait();
         self.cycle_stamp = Some(now);
         self.ack_phase = AckPhase::ProbeStopping;
@@ -1738,7 +1728,6 @@ impl Bbr3 {
             ack_elapsed: now - p.delivered_time,
             rtt: now - p.send_time,
             tx_in_flight: p.tx_in_flight,
-            newly_acked: 0,
             lost: self.lost.saturating_sub(p.lost),
             last_end_seq: packet_number,
             last_packet: p,
@@ -1781,20 +1770,20 @@ impl Bbr3 {
         let Some(mut rs) = self.rs else {
             return;
         };
-        rs.newly_acked = newly_acked;
         rs.interval = Ord::max(rs.send_elapsed, rs.ack_elapsed);
         rs.delivered = self.delivered.saturating_sub(rs.prior_delivered);
-        // An interval shorter than the min RTT is not a reliable rate, but the sample still
-        // advances rounds and the state machine. The min RTT includes this ACK's own sample, as
-        // the transport's does in the draft, so an ACK that lowers the RTT still measures a rate.
+        // An interval shorter than the min RTT is not a reliable rate, so the sample carries no
+        // bandwidth, but it still advances rounds and the state machine as in the draft's
+        // UpdateOnACK. The min RTT includes this ACK's own sample, as the transport's does in the
+        // draft, so an ACK that lowers the RTT still measures a rate.
         // <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
         let reliable = rs.interval >= Ord::min(self.min_rtt, rs.rtt);
         if reliable && rs.interval != Duration::ZERO {
             rs.delivery_rate = rs.delivered as f64 / rs.interval.as_secs_f64();
         }
         self.rs = Some(rs);
-        self.update_model_and_state(rs.last_packet, now);
-        self.update_control_parameters();
+        self.update_model_and_state(rs.last_packet, newly_acked, now);
+        self.update_control_parameters(newly_acked);
     }
 
     fn on_congestion_event(
@@ -1863,7 +1852,7 @@ impl Bbr3 {
         );
         self.min_pipe_cwnd = 4 * self.smss;
         self.set_send_quantum();
-        self.set_cwnd();
+        self.set_cwnd(0);
     }
 
     fn on_ack_frequency_update(
@@ -1901,10 +1890,6 @@ impl Bbr3 {
     }
 }
 
-// The transport reports packet identity through `on_packet_space_sent`, `on_packet_space_acked`,
-// `on_packet_space_lost` and `on_congestion_event_space`. The pn-only callbacks assume
-// `SpaceKind::Data`, which is only correct once the handshake spaces are gone; they remain for
-// direct callers of the old trait methods.
 impl Controller for Bbr3 {
     fn on_packet_space_sent(&mut self, now: Instant, bytes: u16, packet: PacketId) {
         Self::on_packet_sent(self, now, bytes, packet.number, packet.space);
@@ -1956,27 +1941,6 @@ impl Controller for Bbr3 {
         );
     }
 
-    fn on_congestion_event(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        is_persistent_congestion: bool,
-        is_ecn: bool,
-        lost_bytes: u64,
-        largest_lost_pn: u64,
-    ) {
-        Self::on_congestion_event(
-            self,
-            now,
-            sent,
-            is_persistent_congestion,
-            is_ecn,
-            lost_bytes,
-            largest_lost_pn,
-            SpaceKind::Data,
-        );
-    }
-
     fn on_mtu_update(&mut self, new_mtu: u16) {
         Self::on_mtu_update(self, new_mtu);
     }
@@ -1997,37 +1961,12 @@ impl Controller for Bbr3 {
         Self::into_any(self)
     }
 
-    fn on_packet_sent(&mut self, now: Instant, bytes: u16, pn: u64) {
-        Self::on_packet_sent(self, now, bytes, pn, SpaceKind::Data);
-    }
-
     fn on_cwnd_limited(&mut self) {
         Self::on_cwnd_limited(self);
     }
 
     fn on_app_limited(&mut self, in_flight: u64) {
         Self::on_app_limited(self, in_flight);
-    }
-
-    fn on_ack(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        bytes: u64,
-        pn: u64,
-        app_limited: bool,
-        rtt: &RttEstimator,
-    ) {
-        Self::on_ack(
-            self,
-            now,
-            sent,
-            bytes,
-            pn,
-            SpaceKind::Data,
-            app_limited,
-            rtt,
-        );
     }
 
     fn on_end_acks(
@@ -2045,10 +1984,6 @@ impl Controller for Bbr3 {
             largest_packet_num_acked,
             SpaceKind::Data,
         );
-    }
-
-    fn on_packet_lost(&mut self, lost_bytes: u16, pn: u64, now: Instant) {
-        Self::on_packet_lost(self, lost_bytes, pn, SpaceKind::Data, now);
     }
 
     fn on_spurious_congestion_event(&mut self) {
@@ -3702,7 +3637,7 @@ mod test {
         // past cycle_stamp + bw_probe_wait (has_elapsed_in_phase is a strict `>`) and
         // drive one cycle-phase step.
         bbr.probe_rtt_min_stamp = Some(fire_at);
-        bbr.update_probe_bw_cycle_phase(fire_at);
+        bbr.update_probe_bw_cycle_phase(0, fire_at);
 
         // A single cycle step took PROBE_DOWN straight to PROBE_REFILL, bypassing
         // PROBE_CRUISE, because update_probe_bw_cycle_phase checks BBRIsTimeToProbeBW
@@ -5013,7 +4948,7 @@ mod test {
 
     /// A.15: Increasing bandwidth 10x and ensuring full bandwidth is reached.
     /// equivalent to BBRRaiseInflightLongtermSlope / BBRProbeInflightLongtermUpward:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// After PROBE_BW is reached at a low link rate, the bottleneck bandwidth jumps 10x. In
     /// PROBE_UP BBR grows `inflight_longterm` with an exponentially increasing per-round step so
@@ -5022,7 +4957,7 @@ mod test {
     /// The step doubling comes from `raise_inflight_long_term_slope`, called once per round-start
     /// while probing up: `growth_this_round = 1 << bw_probe_up_rounds` packets and
     /// `bw_probe_up_rounds` increments each round, so the unit of growth doubles every round.
-    /// `probe_up_cnt` (bytes to ack per SMSS of `inflight_longterm`) is set to
+    /// `probe_up_acked_per_inc` (bytes to ack per SMSS of `inflight_longterm`) is set to
     /// `max(cwnd / growth_this_round, SMSS)`, so over one round (~cwnd bytes acked)
     /// `inflight_longterm` climbs by ~`growth_this_round` packets, a per-round increment that
     /// doubles each round.
@@ -7232,14 +7167,29 @@ mod test {
     #[test]
     fn loss_only_event_reuses_no_sample() {
         let mut sim = scripted();
-        sim.send(0, 2);
+        sim.send(0, 3);
         sim.ack(10 * MS, [0], false);
         let round_count = sim.bbr.round_count;
 
         sim.lose(12 * MS, 1);
-        sim.ack(15 * MS, [], false);
+        // BBR stops tracking a packet left unacked for more than `ROUND_COUNT_WINDOW` rounds. A
+        // re-fold would pair its bytes with packet 0's interval and double the rate.
+        sim.bbr.packets[SpaceKind::Data as usize].retain(|p| p.packet_number != 2);
+        sim.ack(15 * MS, [2], false);
         assert_eq!(sim.bbr.round_count, round_count);
         assert_eq!(sim.bbr.max_bw, 120_000.0);
+    }
+
+    /// An MTU change between ACKs does not grow cwnd by the last ACK's bytes again.
+    #[test]
+    fn mtu_update_reuses_no_acked_bytes() {
+        let mut sim = scripted();
+        sim.send(0, 10);
+        sim.ack(10 * MS, 0..10, false);
+        let cwnd = sim.bbr.cwnd;
+
+        sim.bbr.on_mtu_update(1200);
+        assert_eq!(sim.bbr.cwnd, cwnd);
     }
 
     /// After an idle period, the first ACK measures the resumed burst, not the pre-idle sample.
@@ -7258,23 +7208,23 @@ mod test {
         assert_eq!(sim.bbr.max_bw, 1_200_000.0);
     }
 
-    /// The application runs dry after the last ACK and resumes before the next: with nothing in
-    /// flight no ACK carries the starvation, so the empty poll itself must mark the resumed packet.
+    /// An application sending one packet per burst, idle in between. The transport polls after
+    /// every send and every ACK, both polls come up empty, and each ACK carries that verdict. The
+    /// ACK that ends a limited phase clears the marker instead of renewing it, and with nothing
+    /// in flight no ACK follows before the next burst, so only the post-ACK poll can mark it.
     #[test]
-    fn starvation_marks_the_resumed_packet() {
+    fn every_resumed_burst_is_app_limited() {
         let mut sim = scripted();
-        sim.send(0, 1);
-        sim.ack(10 * MS, [0], false);
-        // Repeated empty polls keep one marker.
-        sim.starve();
-        sim.starve();
-        assert_eq!(sim.bbr.app_limited, 1200);
-
-        sim.send(30 * MS, 1);
-        assert!(sim.bbr.idle_restart);
-        sim.ack(40 * MS, [1], false);
-        assert!(sim.bbr.rs.unwrap().is_app_limited);
-        assert_eq!(sim.bbr.app_limited, 0);
+        for pn in 0..6 {
+            let sent_ns = pn * 30 * MS;
+            sim.send(sent_ns, 1);
+            // Only the first packet precedes any starvation.
+            assert_eq!(sim.bbr.idle_restart, pn > 0, "packet {pn}");
+            sim.starve();
+            sim.ack(sent_ns + 10 * MS, [pn], true);
+            assert_eq!(sim.bbr.rs.unwrap().is_app_limited, pn > 0, "packet {pn}");
+            sim.starve();
+        }
     }
 
     /// An empty poll with the window full is window-limited, not starved.
@@ -7292,17 +7242,17 @@ mod test {
     fn starvation_boundary_follows_inflight() {
         let mut sim = scripted();
         sim.send(0, 3);
-        sim.ack(10 * MS, [0], false);
         sim.starve();
         assert_eq!(sim.bbr.app_limited, 3600);
 
-        sim.send(12 * MS, 2);
-        sim.ack(20 * MS, [1], false);
+        // A backlog then holds the sender back, so the ACKs are not app-limited.
+        sim.send(2 * MS, 2);
+        sim.ack(10 * MS, [0, 1], false);
         assert!(!sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.app_limited, 3600);
 
         // Packet 4 is the batch's newest, so its label is the sample's.
-        sim.ack(22 * MS, [2, 3, 4], false);
+        sim.ack(12 * MS, [2, 3, 4], false);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.app_limited, 0);
     }
@@ -7477,25 +7427,41 @@ mod test {
         c.on_packet_space_acked(at(20), at(11), PACKET as u64, HANDSHAKE_0, false, &rtt);
 
         let rs = bbr.rs.expect("rate sample");
-        assert_eq!(rs.last_packet.space, SpaceKind::Handshake);
         assert_eq!(rs.last_packet.send_time, at(11));
         assert_eq!(rs.prior_delivered, PACKET as u64);
         assert_eq!(rs.rtt, Duration::from_millis(9));
     }
 
-    /// A loss reported for Handshake packet 0 must not remove Initial packet 0.
+    /// Send times, in ms after `t0`, of the packets BBR still tracks across every space.
+    fn tracked_send_ms(bbr: &Bbr3, t0: Instant) -> Vec<u128> {
+        let mut times: Vec<_> = bbr
+            .packets
+            .iter()
+            .flatten()
+            .map(|p| (p.send_time - t0).as_millis())
+            .collect();
+        times.sort();
+        times
+    }
+
+    /// A loss reported for Handshake packet 0 must remove that packet, not Initial packet 0.
     #[test]
     fn loss_removes_the_packet_from_its_own_space() {
         let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
         let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_packet_space_sent(t0, PACKET, INITIAL_0);
-        c.on_packet_space_sent(t0, PACKET, HANDSHAKE_0);
-        c.on_packet_space_lost(PACKET, HANDSHAKE_0, t0 + Duration::from_millis(10));
+        c.on_packet_space_sent(at(0), PACKET, INITIAL_0);
+        c.on_packet_space_sent(at(1), PACKET, INITIAL_1);
+        c.on_packet_space_sent(at(2), PACKET, HANDSHAKE_0);
+        c.on_packet_space_lost(PACKET, HANDSHAKE_0, at(10));
 
-        assert_eq!(bbr.packets[SpaceKind::Initial as usize].len(), 1);
-        assert!(bbr.packets[SpaceKind::Handshake as usize].is_empty());
+        assert_eq!(
+            tracked_send_ms(&bbr, t0),
+            [0, 1],
+            "only Handshake 0, sent at 2ms, is gone"
+        );
         assert_eq!(bbr.last_lost_packet, Some((SpaceKind::Handshake, 0)));
     }
 
@@ -7504,20 +7470,18 @@ mod test {
     fn ecn_congestion_marks_the_packet_from_its_own_space() {
         let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
         let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_packet_space_sent(t0, PACKET, INITIAL_0);
-        c.on_packet_space_sent(t0, PACKET, HANDSHAKE_0);
-        c.on_congestion_event_space(
-            t0 + Duration::from_millis(10),
-            t0,
-            false,
-            true,
-            0,
-            HANDSHAKE_0,
-        );
+        c.on_packet_space_sent(at(0), PACKET, INITIAL_0);
+        c.on_packet_space_sent(at(1), PACKET, INITIAL_1);
+        c.on_packet_space_sent(at(2), PACKET, HANDSHAKE_0);
+        c.on_congestion_event_space(at(10), at(2), false, true, 0, HANDSHAKE_0);
 
-        assert_eq!(bbr.packets[SpaceKind::Initial as usize].len(), 1);
-        assert!(bbr.packets[SpaceKind::Handshake as usize].is_empty());
+        assert_eq!(
+            tracked_send_ms(&bbr, t0),
+            [0, 1],
+            "only Handshake 0, sent at 2ms, is gone"
+        );
     }
 }
