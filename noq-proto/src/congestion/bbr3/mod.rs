@@ -7161,12 +7161,15 @@ mod test {
     #[test]
     fn loss_only_event_reuses_no_sample() {
         let mut sim = scripted();
-        sim.send(0, 2);
+        sim.send(0, 3);
         sim.ack(10 * MS, [0], false);
         let round_count = sim.bbr.round_count;
 
         sim.lose(12 * MS, 1);
-        sim.ack(15 * MS, [], false);
+        // BBR stops tracking a packet left unacked for more than `ROUND_COUNT_WINDOW` rounds. A
+        // re-fold would pair its bytes with packet 0's interval and double the rate.
+        sim.bbr.packets[SpaceKind::Data as usize].retain(|p| p.packet_number != 2);
+        sim.ack(15 * MS, [2], false);
         assert_eq!(sim.bbr.round_count, round_count);
         assert_eq!(sim.bbr.max_bw, 120_000.0);
     }
