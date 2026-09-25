@@ -1,5 +1,5 @@
-# Publishes moq-noq-proto, moq-noq-udp, and moq-noq when a `v*` tag is pushed.
-# The tag must match `workspace.package.version`.
+# Publishes moq-noq-proto, moq-noq-udp, moq-noq, and web-transport-moq when a `v*` tag
+# is pushed. The tag must match `workspace.package.version`.
 #
 # Uses crates.io trusted publishing, so each crate must list this repository
 # and workflow as a trusted publisher. The very first version of a crate has to

@@ -9,7 +9,8 @@ needs before they land upstream, and it never publishes under the parent's
 names. `PARENT` names the
 upstream commit each release includes, and `moq-sync` merges upstream weekly.
 General changes are offered upstream once their shape settles; the carried set
-is `git log --no-merges upstream/main..main`.
+is `git log --no-merges upstream/main..main`. [CHANGELOG-MOQ.md](CHANGELOG-MOQ.md) lists each
+release's parent and carried changes.
 
 The upstream README follows.
 
