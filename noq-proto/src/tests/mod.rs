@@ -4822,6 +4822,7 @@ type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
 struct PacketRecorder {
     log: PacketLog,
     window: u64,
+    pacing_rate: Option<u64>,
 }
 
 impl PacketRecorder {
@@ -4908,6 +4909,15 @@ impl Controller for PacketRecorder {
         self.window
     }
 
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window,
+            ssthresh: None,
+            pacing_rate: self.pacing_rate,
+            send_quantum: None,
+        }
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
     }
@@ -4927,6 +4937,8 @@ struct PacketRecorderFactory {
     logs: Mutex<Vec<PacketLog>>,
     /// The congestion window every controller reports; effectively unlimited if unset
     window: Option<u64>,
+    /// The pacing rate in bytes/sec every controller reports; derived from the window if unset
+    pacing_rate: Option<u64>,
 }
 
 impl ControllerFactory for PacketRecorderFactory {
@@ -4936,6 +4948,7 @@ impl ControllerFactory for PacketRecorderFactory {
         Box::new(PacketRecorder {
             log,
             window: self.window.unwrap_or(u64::MAX / 2),
+            pacing_rate: self.pacing_rate,
         })
     }
 }
@@ -5056,11 +5069,8 @@ fn congestion_callbacks_identify_packets_across_spaces() {
 }
 
 /// Connects a pair whose controllers record their callbacks, returning the client's log.
-fn recorded_pair(window: Option<u64>) -> (Pair, ConnectionHandle, PacketLog) {
-    let factory = Arc::new(PacketRecorderFactory {
-        window,
-        ..Default::default()
-    });
+fn recorded_pair(factory: PacketRecorderFactory) -> (Pair, ConnectionHandle, PacketLog) {
+    let factory = Arc::new(factory);
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(factory.clone());
     let transport = Arc::new(transport);
@@ -5082,7 +5092,7 @@ fn recorded_pair(window: Option<u64>) -> (Pair, ConnectionHandle, PacketLog) {
 /// the controller of starvation before the resumed send.
 fn check_starvation_reported_before_resumed_send(send: impl Fn(&mut Pair, ConnectionHandle)) {
     let _guard = subscribe();
-    let (mut pair, client_ch, log) = recorded_pair(None);
+    let (mut pair, client_ch, log) = recorded_pair(Default::default());
     send(&mut pair, client_ch);
     pair.drive();
 
@@ -5122,11 +5132,15 @@ fn datagram_starvation_reported_before_resumed_send() {
     });
 }
 
-/// A backlog held back by the congestion window or the pacer is not starvation.
-#[test]
-fn blocked_backlog_is_not_app_limited() {
+/// Writes a backlog that `factory`'s controllers hold back, and checks it never reports
+/// starvation.
+fn check_blocked_backlog_is_not_app_limited(factory: PacketRecorderFactory) {
     let _guard = subscribe();
-    let (mut pair, client_ch, log) = recorded_pair(Some(12_000));
+    let (mut pair, client_ch, log) = recorded_pair(factory);
+    // The handshake can drain the pacer, and how far depends on its random sizes. Refill it so
+    // the backlog always starts sending before it is held back.
+    pair.time += Duration::from_millis(100);
+    pair.drive();
     let before = log.lock().unwrap().len();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
@@ -5143,6 +5157,23 @@ fn blocked_backlog_is_not_app_limited() {
             .any(|e| matches!(e, PacketEvent::AppLimited { .. })),
         "a blocked backlog reported starvation"
     );
+}
+
+#[test]
+fn window_blocked_backlog_is_not_app_limited() {
+    check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+        window: Some(12_000),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn pacing_blocked_backlog_is_not_app_limited() {
+    // 1 Mbit/s holds the backlog back long before the unlimited window fills.
+    check_blocked_backlog_is_not_app_limited(PacketRecorderFactory {
+        pacing_rate: Some(125_000),
+        ..Default::default()
+    });
 }
 
 /// This test used to fail due to incorrectly encoding frame::MaybeFrame::None
