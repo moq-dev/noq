@@ -1178,6 +1178,19 @@ impl Bbr3 {
     /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
     fn check_probe_rtt(&mut self, now: Instant) {
         if self.state != BbrState::ProbeRtt && self.probe_rtt_expired && !self.idle_restart {
+            // A probe cut short here still owes its max-bw window advance, which the draft never
+            // pays: the round ending its feedback finishes inside ProbeRTT, and the round after
+            // exit carries ProbeRTT's app-limited samples. Without this, a flow whose every probe
+            // ProbeRTT interrupts keeps a stale maximum forever.
+            if let BbrState::ProbeBw(_) = self.state
+                && matches!(
+                    self.ack_phase,
+                    AckPhase::ProbeStarting | AckPhase::ProbeFeedback | AckPhase::ProbeStopping
+                )
+                && self.rs.is_some_and(|rs| !rs.is_app_limited)
+            {
+                self.advance_max_bw_filter();
+            }
             self.enter_probe_rtt();
             self.save_cwnd();
             self.probe_rtt_done_stamp = None;
@@ -7379,9 +7392,8 @@ mod test {
         assert_eq!(sim.bbr.max_bw, 12_000_000.0);
     }
 
-    /// ProbeRTT entered mid-probe ends the probe's feedback once. The round that finishes it
-    /// after ProbeRTT returns to cruising still carries ProbeRTT's protected samples, so the
-    /// window does not age, and later cruise rounds do not age it either.
+    /// ProbeRTT entered mid-probe ends the probe's feedback: the window ages once, on entry, and
+    /// neither ProbeRTT's protected rounds nor later cruise rounds age it again.
     #[test]
     fn probe_rtt_finishes_probe_feedback_once() {
         let mut sim = probed();
@@ -7395,6 +7407,7 @@ mod test {
         sim.round(20 * MS, 100, 10 * MS);
         sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+        assert_eq!(sim.bbr.cycle_count, cycle + 1);
 
         let mut now = 30 * MS;
         while sim.bbr.state == BbrState::ProbeRtt {
@@ -7403,13 +7416,13 @@ mod test {
             assert!(now < 1000 * MS, "ProbeRTT never ended");
         }
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
-        assert_eq!(sim.bbr.cycle_count, cycle);
+        assert_eq!(sim.bbr.cycle_count, cycle + 1);
         assert!(!sim.bbr.bw_probe_samples);
 
         for i in 0..5 {
             sim.round(now + i * 10 * MS, 100, 10 * MS);
         }
-        assert_eq!(sim.bbr.cycle_count, cycle);
+        assert_eq!(sim.bbr.cycle_count, cycle + 1);
     }
 
     /// A scripted `Sim` that has just entered ProbeRTT after measuring 12 MB/s over a 10ms RTT,
