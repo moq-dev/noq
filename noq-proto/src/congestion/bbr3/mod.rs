@@ -1646,6 +1646,16 @@ impl Bbr3 {
         self.cwnd_limited_this_round = true;
     }
 
+    /// equivalent to MarkConnectionAppLimited <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
+    ///
+    /// A full window means the connection is window-limited, not starved, so it marks nothing.
+    fn on_app_limited(&mut self, in_flight: u64) {
+        if in_flight >= self.cwnd {
+            return;
+        }
+        self.app_limited = Ord::max(self.delivered + in_flight, 1);
+    }
+
     /// equivalent to UpdateRateSample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
     ///
     /// Only records this ACK's newest packet; the model waits for [`Self::on_end_acks`], once the
@@ -1778,6 +1788,10 @@ impl Bbr3 {
     ) {
         let lost_bytes_64 = lost_bytes as u64;
         self.lost += lost_bytes_64;
+        // C.inflight excludes lost bytes, and the next ACK may come after the next send. Saturate
+        // because the transport also reports losses of packets this count may not include, such
+        // as padded ones that were not ack-eliciting.
+        self.inflight = self.inflight.saturating_sub(lost_bytes_64);
         let p_index_result =
             self.packets[space as usize].binary_search_by_key(&packet_number, |p| p.packet_number);
         if let Ok(p_index) = p_index_result {
@@ -1922,6 +1936,10 @@ impl Controller for Bbr3 {
 
     fn on_cwnd_limited(&mut self) {
         Self::on_cwnd_limited(self);
+    }
+
+    fn on_app_limited(&mut self, in_flight: u64) {
+        Self::on_app_limited(self, in_flight);
     }
 
     fn on_end_acks(
@@ -2126,6 +2144,11 @@ mod test {
             // The transport reports the largest packet ever acked; only its presence matters.
             self.bbr
                 .on_end_acks(now, self.inflight, app_limited, Some(0), SpaceKind::Data);
+        }
+
+        /// Report an empty transmit poll that nothing held back, as the transport does.
+        fn starve(&mut self) {
+            self.bbr.on_app_limited(self.inflight);
         }
 
         /// Declare packet `pn` lost at `now_ns`, outside any ACK.
@@ -7147,6 +7170,70 @@ mod test {
         let rs = sim.bbr.rs.unwrap();
         assert!(rs.is_app_limited);
         assert_eq!(sim.bbr.max_bw, 1_200_000.0);
+    }
+
+    /// An application sending one packet per burst, idle in between. The transport polls after
+    /// every send and every ACK, both polls come up empty, and each ACK carries that verdict. The
+    /// ACK that ends a limited phase clears the marker instead of renewing it, and with nothing
+    /// in flight no ACK follows before the next burst, so only the post-ACK poll can mark it.
+    #[test]
+    fn every_resumed_burst_is_app_limited() {
+        let mut sim = scripted();
+        for pn in 0..6 {
+            let sent_ns = pn * 30 * MS;
+            sim.send(sent_ns, 1);
+            // Only the first packet precedes any starvation.
+            assert_eq!(sim.bbr.idle_restart, pn > 0, "packet {pn}");
+            sim.starve();
+            sim.ack(sent_ns + 10 * MS, [pn], true);
+            assert_eq!(sim.bbr.rs.unwrap().is_app_limited, pn > 0, "packet {pn}");
+            sim.starve();
+        }
+    }
+
+    /// Losing the last packet in flight leaves the path idle, so the next burst restarts from
+    /// idle before any ACK arrives.
+    #[test]
+    fn losing_the_last_packet_restarts_from_idle() {
+        let mut sim = scripted();
+        sim.send(0, 2);
+        sim.starve();
+        sim.ack(10 * MS, [0], true);
+        sim.lose(20 * MS, 1);
+        sim.starve();
+
+        sim.send(30 * MS, 1);
+        assert!(sim.bbr.idle_restart);
+    }
+
+    /// An empty poll with the window full is window-limited, not starved.
+    #[test]
+    fn full_window_is_not_starvation() {
+        let mut sim = scripted();
+        sim.send(0, sim.bbr.cwnd.div_ceil(1200));
+        sim.starve();
+        assert_eq!(sim.bbr.app_limited, 0);
+    }
+
+    /// Starvation with data in flight marks only packets sent after it, and the limited phase
+    /// ends once they deliver, even when a batched ACK covers both.
+    #[test]
+    fn starvation_boundary_follows_inflight() {
+        let mut sim = scripted();
+        sim.send(0, 3);
+        sim.starve();
+        assert_eq!(sim.bbr.app_limited, 3600);
+
+        // A backlog then holds the sender back, so the ACKs are not app-limited.
+        sim.send(2 * MS, 2);
+        sim.ack(10 * MS, [0, 1], false);
+        assert!(!sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.app_limited, 3600);
+
+        // Packet 4 is the batch's newest, so its label is the sample's.
+        sim.ack(12 * MS, [2, 3, 4], false);
+        assert!(sim.bbr.rs.unwrap().is_app_limited);
+        assert_eq!(sim.bbr.app_limited, 0);
     }
 
     /// Packet size for the packet identity tests.
