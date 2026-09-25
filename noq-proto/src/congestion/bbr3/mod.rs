@@ -1864,7 +1864,9 @@ impl Bbr3 {
             Some(up @ BbrState::ProbeBw(ProbeBwSubstate::Up))
                 if self.state != up && self.state != BbrState::ProbeRtt =>
             {
-                self.start_probe_bw_up();
+                // The loss exit stopped the probe reacting to loss; REFILL's round re-arms that
+                // before probing again.
+                self.start_probe_bw_refill();
             }
             _ => {}
         }
@@ -5791,10 +5793,10 @@ mod test {
     ///    `inflight_longterm` finite.
     ///  - `on_spurious_congestion_event` restored the saved model:
     ///    `bw_shortterm`/`inflight_shortterm` to `max(current, undo)` (their +inf/u64::MAX
-    ///    sentinels) and `inflight_longterm` back to u64::MAX, and seamlessly returned the flow to
-    ///    its previous state, PROBE_UP.
+    ///    sentinels) and `inflight_longterm` back to u64::MAX, and restarted the probe through
+    ///    PROBE_REFILL.
     ///
-    /// Note on the short-term fields: for a spurious episode that restores to PROBE_UP they are
+    /// Note on the short-term fields: for a spurious episode that exited PROBE_UP they are
     /// necessarily at their sentinels: `adapt_lower_bounds_from_congestion` skips PROBE_UP, so no
     /// loss taken in PROBE_UP moves them. So the meaningful restored quantities here are
     /// `inflight_longterm` and the state; the short-term fields are verified saved and restored
@@ -6002,11 +6004,11 @@ mod test {
         // should never have happened) and reports it.
         bbr.on_spurious_congestion_event();
 
-        // on_spurious_congestion_event restored the saved model and returned to PROBE_UP.
+        // on_spurious_congestion_event restored the saved model and restarted the probe.
         assert_eq!(
             bbr.state,
-            BbrState::ProbeBw(ProbeBwSubstate::Up),
-            "on_spurious_congestion_event should seamlessly return the flow to PROBE_UP"
+            BbrState::ProbeBw(ProbeBwSubstate::Refill),
+            "on_spurious_congestion_event should restart the probe through PROBE_REFILL"
         );
         assert_eq!(
             bbr.inflight_longterm,
@@ -6068,10 +6070,10 @@ mod test {
     ///    finite.
     ///  - `on_spurious_congestion_event` restored the saved model:
     ///    `bw_shortterm`/`inflight_shortterm` to `max(current, undo)` (their +inf/u64::MAX
-    ///    sentinels) and `inflight_longterm` back to u64::MAX, and seamlessly returned the flow to
-    ///    its previous state, PROBE_UP.
+    ///    sentinels) and `inflight_longterm` back to u64::MAX, and restarted the probe through
+    ///    PROBE_REFILL.
     ///
-    /// Note on the short-term fields: as in A.18, for a spurious episode that restores to PROBE_UP
+    /// Note on the short-term fields: as in A.18, for a spurious episode that exited PROBE_UP
     /// they are necessarily at their sentinels (`adapt_lower_bounds_from_congestion` skips
     /// PROBE_UP). So the meaningful restored quantities here are
     /// `inflight_longterm` and the state; the short-term fields are verified saved and restored
@@ -6281,11 +6283,11 @@ mod test {
         // packets delivered; the RTO recovery should never have happened) and reports it.
         bbr.on_spurious_congestion_event();
 
-        // on_spurious_congestion_event restored the saved model and returned to PROBE_UP.
+        // on_spurious_congestion_event restored the saved model and restarted the probe.
         assert_eq!(
             bbr.state,
-            BbrState::ProbeBw(ProbeBwSubstate::Up),
-            "on_spurious_congestion_event should seamlessly return the flow to PROBE_UP"
+            BbrState::ProbeBw(ProbeBwSubstate::Refill),
+            "on_spurious_congestion_event should restart the probe through PROBE_REFILL"
         );
         assert_eq!(
             bbr.inflight_longterm,
@@ -7547,7 +7549,26 @@ mod test {
         sim.bbr.on_spurious_congestion_event();
         assert_eq!(sim.bbr.inflight_longterm, 100_000);
         assert_eq!(sim.bbr.cwnd, 20_000);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Refill));
+    }
+
+    /// A probe restarted by undoing its loss exit reacts to loss again.
+    #[test]
+    fn restarted_probe_reacts_to_loss() {
+        let mut sim = probing_up();
+        sim.lose(15 * MS, 10);
+        sim.bbr.on_spurious_congestion_event();
+        sim.ack(20 * MS, 11..20, false);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
+
+        // Lose half of the next round.
+        let first = sim.pn;
+        sim.send(20 * MS, 10);
+        for pn in (first..sim.pn).step_by(2) {
+            sim.lose(25 * MS, pn);
+        }
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        assert!(sim.bbr.inflight_longterm < 100_000);
     }
 
     /// A loss of a packet sent after the episode began starts a new episode with a new snapshot,
