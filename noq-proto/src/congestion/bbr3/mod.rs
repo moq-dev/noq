@@ -1116,7 +1116,9 @@ impl Bbr3 {
     /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// Growing in whole packets lets the cwnd catch up between increments, so PROBE_UP sees the
-    /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it.
+    /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it. Once
+    /// `probe_up_acked_per_inc` falls to its SMSS floor, each ACK grows the bound before the cwnd
+    /// follows, so late rounds no longer reset the plateau check. The draft and Linux do the same.
     fn probe_inflight_long_term_upward(&mut self) {
         if !self.is_cwnd_limited || self.cwnd < self.inflight_longterm {
             return;
