@@ -1200,8 +1200,9 @@ impl Bbr3 {
 
     /// equivalent to BBRHandleProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
     fn handle_probe_rtt(&mut self, now: Instant) {
-        // Packets sent at the reduced ProbeRTT window do not measure the path's capacity.
-        self.on_app_limited(self.inflight);
+        // Packets sent at the reduced ProbeRTT window do not measure the path's capacity, whether
+        // or not inflight fills that window, so this skips the starvation check's cwnd guard.
+        self.app_limited = Ord::max(self.delivered + self.inflight, 1);
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
             self.probe_rtt_done_stamp =
                 Some(now.checked_add(self.probe_rtt_duration).unwrap_or(now));
@@ -1685,7 +1686,7 @@ impl Bbr3 {
         self.cwnd_limited_this_round = true;
     }
 
-    /// equivalent to MarkConnectionAppLimited <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
+    /// equivalent to CheckIfApplicationLimited <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
     ///
     /// A full window means the connection is window-limited, not starved, so it marks nothing.
     fn on_app_limited(&mut self, in_flight: u64) {
@@ -7494,6 +7495,25 @@ mod test {
         sim.round(now + 10 * MS, 4, 10 * MS);
         assert!(!sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.max_bw, 480_000.0);
+    }
+
+    /// ProbeRTT protects its samples even while inflight fills its window, as when a
+    /// window-exempt PTO probe goes out on top of a full window.
+    #[test]
+    fn probe_rtt_protects_samples_beyond_its_window() {
+        let mut sim = probing_rtt();
+        let first = sim.pn;
+        sim.send(20 * MS, sim.bbr.cwnd / sim.mss + 1);
+
+        // Delivering one packet leaves a full window in flight.
+        sim.ack(30 * MS, first..first + 1, false);
+        assert_eq!(sim.inflight, sim.bbr.cwnd);
+        let probe = sim.pn;
+        sim.send(30 * MS, 1);
+
+        sim.ack(40 * MS, probe..probe + 1, false);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+        assert_eq!(sim.bbr.max_bw, 12_000_000.0);
     }
 
     /// A sample above the maximum still raises it during ProbeRTT.
