@@ -940,6 +940,8 @@ impl Bbr3 {
         if self.recovery_start_time.is_some_and(|start| sent <= start) {
             return;
         }
+        // Not also per loss round, as draft-06's NoteLoss does: that contradicts its own prose
+        // and Linux's bbr_ssthresh, and would save a model this episode already cut.
         self.save_state_upon_loss();
         self.recovery_start_time = Some(now);
         self.recovery_start_round = self.round_count;
@@ -7572,7 +7574,8 @@ mod test {
     }
 
     /// A loss of a packet sent after the episode began starts a new episode with a new snapshot,
-    /// so undoing it keeps the earlier episode's real reduction.
+    /// so undoing it keeps the earlier episode's real reduction. Snapshotting on every loss also
+    /// passes this; it guards against keeping one snapshot for too long.
     #[test]
     fn new_episode_takes_a_new_snapshot() {
         let mut sim = probing_up();
