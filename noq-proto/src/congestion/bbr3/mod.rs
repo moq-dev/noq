@@ -521,12 +521,11 @@ pub struct Bbr3 {
     /// equivalent to BBR.bw_probe_up_rounds: number of rounds that have been executed in probe up
     /// state
     bw_probe_up_rounds: u32,
-    /// equivalent to BBR.bw_probe_up_acks: volume of data in bytes that has been acknowledged
-    /// during probe up state
-    bw_probe_up_acks: u64,
+    /// equivalent to BBR.bw_probe_up_acked: bytes acknowledged since `inflight_longterm` last grew
+    bw_probe_up_acked: u64,
     /// equivalent to BBR.probe_up_acked_per_inc: bytes to acknowledge per SMSS of
     /// `inflight_longterm` growth during probe up state
-    probe_up_cnt: u64,
+    probe_up_acked_per_inc: u64,
     /// equivalent to BBR.cycle_stamp: timestamp when we start probing down state
     cycle_stamp: Option<Instant>,
     /// equivalent to BBR.ack_phase: ACK phase during probing states
@@ -690,8 +689,8 @@ impl Bbr3 {
             rounds_since_bw_probe: 0,
             bw_probe_wait: Duration::ZERO,
             bw_probe_up_rounds: 0,
-            bw_probe_up_acks: 0,
-            probe_up_cnt: 0,
+            bw_probe_up_acked: 0,
+            probe_up_acked_per_inc: 0,
             cycle_stamp: None,
             ack_phase: AckPhase::Init,
             bw_probe_samples: false,
@@ -1076,7 +1075,7 @@ impl Bbr3 {
     fn start_probe_bw_refill(&mut self) {
         self.reset_short_term_model();
         self.bw_probe_up_rounds = 0;
-        self.bw_probe_up_acks = 0;
+        self.bw_probe_up_acked = 0;
         self.ack_phase = AckPhase::Refilling;
         self.start_round();
         self.cwnd_gain = self.default_cwnd_gain;
@@ -1123,11 +1122,12 @@ impl Bbr3 {
             return;
         }
         if let Some(rate_sample) = self.rs {
-            self.bw_probe_up_acks += rate_sample.newly_acked;
+            self.bw_probe_up_acked += rate_sample.newly_acked;
         }
-        if self.bw_probe_up_acks >= self.probe_up_cnt && self.probe_up_cnt > 0 {
-            let delta = self.bw_probe_up_acks / self.probe_up_cnt;
-            self.bw_probe_up_acks -= delta * self.probe_up_cnt;
+        if self.bw_probe_up_acked >= self.probe_up_acked_per_inc && self.probe_up_acked_per_inc > 0
+        {
+            let delta = self.bw_probe_up_acked / self.probe_up_acked_per_inc;
+            self.bw_probe_up_acked -= delta * self.probe_up_acked_per_inc;
             self.inflight_longterm += delta * self.smss;
         }
         if self.round_start {
@@ -1277,7 +1277,7 @@ impl Bbr3 {
             .unwrap_or(u64::MAX);
         self.bw_probe_up_rounds =
             Ord::min(self.bw_probe_up_rounds + 1, MAX_LONG_TERM_PROBE_UP_ROUNDS);
-        self.probe_up_cnt = Ord::max(self.cwnd / growth_this_round, self.smss);
+        self.probe_up_acked_per_inc = Ord::max(self.cwnd / growth_this_round, self.smss);
     }
 
     /// equivalent to BBRHandleRestartFromIdle <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.4.1>
@@ -1603,7 +1603,7 @@ impl Bbr3 {
     /// equivalent to BBRStartProbeBW_DOWN <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-4>
     fn start_probe_bw_down(&mut self, now: Instant) {
         self.reset_congestion_signals();
-        self.probe_up_cnt = u64::MAX;
+        self.probe_up_acked_per_inc = u64::MAX;
         self.pick_probe_wait();
         self.cycle_stamp = Some(now);
         self.ack_phase = AckPhase::ProbeStopping;
@@ -5002,7 +5002,7 @@ mod test {
     /// The step doubling comes from `raise_inflight_long_term_slope`, called once per round-start
     /// while probing up: `growth_this_round = 1 << bw_probe_up_rounds` packets and
     /// `bw_probe_up_rounds` increments each round, so the unit of growth doubles every round.
-    /// `probe_up_cnt` (bytes to ack per SMSS of `inflight_longterm`) is set to
+    /// `probe_up_acked_per_inc` (bytes to ack per SMSS of `inflight_longterm`) is set to
     /// `max(cwnd / growth_this_round, SMSS)`, so over one round (~cwnd bytes acked)
     /// `inflight_longterm` climbs by ~`growth_this_round` packets, a per-round increment that
     /// doubles each round.
