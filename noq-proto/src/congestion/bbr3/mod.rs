@@ -7220,23 +7220,23 @@ mod test {
         assert_eq!(sim.bbr.max_bw, 1_200_000.0);
     }
 
-    /// The application runs dry after the last ACK and resumes before the next: with nothing in
-    /// flight no ACK carries the starvation, so the empty poll itself must mark the resumed packet.
+    /// An application sending one packet per burst, idle in between. The transport polls after
+    /// every send and every ACK, both polls come up empty, and each ACK carries that verdict. The
+    /// ACK that ends a limited phase clears the marker instead of renewing it, and with nothing
+    /// in flight no ACK follows before the next burst, so only the post-ACK poll can mark it.
     #[test]
-    fn starvation_marks_the_resumed_packet() {
+    fn every_resumed_burst_is_app_limited() {
         let mut sim = scripted();
-        sim.send(0, 1);
-        sim.ack(10 * MS, [0], false);
-        // Repeated empty polls keep one marker.
-        sim.starve();
-        sim.starve();
-        assert_eq!(sim.bbr.app_limited, 1200);
-
-        sim.send(30 * MS, 1);
-        assert!(sim.bbr.idle_restart);
-        sim.ack(40 * MS, [1], false);
-        assert!(sim.bbr.rs.unwrap().is_app_limited);
-        assert_eq!(sim.bbr.app_limited, 0);
+        for pn in 0..6 {
+            let sent_ns = pn * 30 * MS;
+            sim.send(sent_ns, 1);
+            // Only the first packet precedes any starvation.
+            assert_eq!(sim.bbr.idle_restart, pn > 0, "packet {pn}");
+            sim.starve();
+            sim.ack(sent_ns + 10 * MS, [pn], true);
+            assert_eq!(sim.bbr.rs.unwrap().is_app_limited, pn > 0, "packet {pn}");
+            sim.starve();
+        }
     }
 
     /// An empty poll with the window full is window-limited, not starved.
@@ -7254,17 +7254,17 @@ mod test {
     fn starvation_boundary_follows_inflight() {
         let mut sim = scripted();
         sim.send(0, 3);
-        sim.ack(10 * MS, [0], false);
         sim.starve();
         assert_eq!(sim.bbr.app_limited, 3600);
 
-        sim.send(12 * MS, 2);
-        sim.ack(20 * MS, [1], false);
+        // A backlog then holds the sender back, so the ACKs are not app-limited.
+        sim.send(2 * MS, 2);
+        sim.ack(10 * MS, [0, 1], false);
         assert!(!sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.app_limited, 3600);
 
         // Packet 4 is the batch's newest, so its label is the sample's.
-        sim.ack(22 * MS, [2, 3, 4], false);
+        sim.ack(12 * MS, [2, 3, 4], false);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.app_limited, 0);
     }
