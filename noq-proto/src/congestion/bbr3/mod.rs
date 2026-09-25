@@ -1575,7 +1575,12 @@ impl Bbr3 {
     /// Runs once per recovery episode, so later losses in it cannot overwrite the pre-episode
     /// model with one they already reduced.
     fn save_state_upon_loss(&mut self) {
-        self.save_cwnd();
+        // Unlike SaveCwnd, not kept at an earlier episode's larger window: undo restores only
+        // this episode's model. ProbeRTT's cut is temporary, so its saved window is kept.
+        self.prior_cwnd = match self.state {
+            BbrState::ProbeRtt => Ord::max(self.prior_cwnd, self.cwnd),
+            _ => self.cwnd,
+        };
         self.undo_state = None;
         self.undo_bw_shortterm = self.bw_shortterm;
         self.undo_inflight_shortterm = self.inflight_shortterm;
@@ -7594,6 +7599,28 @@ mod test {
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
     }
 
+    /// A new episode inside an earlier one saves the window the earlier one already cut, so
+    /// undoing the new episode keeps that cut along with the earlier episode's bound.
+    #[test]
+    fn new_episode_saves_the_cut_window() {
+        let mut sim = probing_up();
+        sim.ack(14 * MS, [11], false);
+        sim.bbr.start_probe_bw_down(sim.at(14 * MS));
+        // The probe's feedback is still arriving, so a loss cuts the bound without a state change.
+        sim.bbr.bw_probe_samples = true;
+        sim.lose(15 * MS, 10);
+        // An ACK from the lost packet's flight cuts the window without ending the loss round.
+        sim.ack(16 * MS, [12], false);
+        assert!(sim.bbr.loss_in_round);
+        let cwnd = sim.bbr.cwnd;
+        assert!(cwnd < 20_000);
+        sim.send(16 * MS, 1);
+        sim.lose(17 * MS, sim.pn - 1);
+
+        sim.bbr.on_spurious_congestion_event();
+        assert_eq!(sim.bbr.cwnd, cwnd);
+    }
+
     /// ProbeRTT entered during a recovery episode keeps the episode's saved window: undoing the
     /// episode keeps ProbeRTT's bound, and ProbeRTT's exit restores the window.
     #[test]
@@ -7620,6 +7647,22 @@ mod test {
             assert!(now < 1000 * MS, "ProbeRTT never ended");
         }
         assert!(sim.bbr.cwnd >= 20_000);
+    }
+
+    /// An episode that starts in ProbeRTT keeps the window saved on entering ProbeRTT, which
+    /// ProbeRTT's exit restores.
+    #[test]
+    fn probe_rtt_episode_keeps_the_saved_window() {
+        let mut sim = probing_up();
+        sim.bbr.probe_rtt_interval = Duration::ZERO;
+        sim.ack(20 * MS, 10..20, false);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+        let saved = sim.bbr.prior_cwnd;
+        assert!(sim.bbr.cwnd < saved);
+
+        sim.send(20 * MS, 1);
+        sim.lose(25 * MS, sim.pn - 1);
+        assert_eq!(sim.bbr.prior_cwnd, saved);
     }
 
     /// Undoing a Startup high-loss exit from within ProbeRTT stays in ProbeRTT, which then
