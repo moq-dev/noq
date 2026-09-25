@@ -4621,17 +4621,6 @@ impl Controller for PacingOnlyController {
         self.cwnd_limited_reports.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-    ) {
-    }
-
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
     fn window(&self) -> u64 {
@@ -4715,17 +4704,6 @@ struct FixedQuantumController {
 }
 
 impl Controller for FixedQuantumController {
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-    ) {
-    }
-
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
     fn window(&self) -> u64 {
@@ -4815,7 +4793,7 @@ enum PacketEvent {
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
 
-/// Records the packet-identity callbacks and fails on the pn-only ones the transport replaced.
+/// Records the per-packet congestion callbacks.
 #[derive(Debug, Clone)]
 struct PacketRecorder {
     log: PacketLog,
@@ -4861,38 +4839,6 @@ impl Controller for PacketRecorder {
             largest: largest_lost,
             ecn: is_ecn,
         });
-    }
-
-    fn on_packet_sent(&mut self, _now: Instant, _bytes: u16, _pn: u64) {
-        panic!("transport called the pn-only on_packet_sent");
-    }
-
-    fn on_ack(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _bytes: u64,
-        _pn: u64,
-        _app_limited: bool,
-        _rtt: &RttEstimator,
-    ) {
-        panic!("transport called the pn-only on_ack");
-    }
-
-    fn on_packet_lost(&mut self, _lost_bytes: u16, _pn: u64, _now: Instant) {
-        panic!("transport called the pn-only on_packet_lost");
-    }
-
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost_pn: u64,
-    ) {
-        panic!("transport called the pn-only on_congestion_event");
     }
 
     fn on_mtu_update(&mut self, _new_mtu: u16) {}

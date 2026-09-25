@@ -2,7 +2,7 @@ use std::any::Any;
 use std::cmp;
 use std::sync::Arc;
 
-use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
+use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, PacketId};
 use crate::connection::RttEstimator;
 use crate::{Duration, Instant};
 
@@ -102,12 +102,12 @@ impl Cubic {
 }
 
 impl Controller for Cubic {
-    fn on_ack(
+    fn on_packet_space_acked(
         &mut self,
         now: Instant,
         sent: Instant,
         bytes: u64,
-        _pn: u64,
+        _packet: PacketId,
         app_limited: bool,
         rtt: &RttEstimator,
     ) {
@@ -181,14 +181,14 @@ impl Controller for Cubic {
         }
     }
 
-    fn on_congestion_event(
+    fn on_congestion_event_space(
         &mut self,
         now: Instant,
         sent: Instant,
         is_persistent_congestion: bool,
         is_ecn: bool,
         _lost_bytes: u64,
-        _largest_lost_pn: u64,
+        _largest_lost: PacketId,
     ) {
         if self
             .state
@@ -310,6 +310,7 @@ impl ControllerFactory for CubicConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::congestion::Space;
 
     #[test]
     fn fast_convergence_reduces_w_max_without_double_reducing_window() {
@@ -322,7 +323,17 @@ mod tests {
         cubic.state.ssthresh = window;
         cubic.state.w_max = 12.0 * BASE_DATAGRAM_SIZE as f64;
 
-        cubic.on_congestion_event(now, now + Duration::from_millis(1), false, false, 0, 100);
+        cubic.on_congestion_event_space(
+            now,
+            now + Duration::from_millis(1),
+            false,
+            false,
+            0,
+            PacketId {
+                space: Space::Data,
+                number: 100,
+            },
+        );
 
         assert_eq!(cubic.state.w_max, window as f64 * (1.0 + BETA_CUBIC) / 2.0);
         assert_eq!(cubic.state.ssthresh, (window as f64 * BETA_CUBIC) as u64);
@@ -346,11 +357,14 @@ mod tests {
         cubic.state.cwnd_inc = 2 * BASE_DATAGRAM_SIZE + 1;
         let window = cubic.state.window;
 
-        cubic.on_ack(
+        cubic.on_packet_space_acked(
             now,
             now + Duration::from_millis(1),
             BASE_DATAGRAM_SIZE,
-            0,
+            PacketId {
+                space: Space::Data,
+                number: 0,
+            },
             false,
             &rtt,
         );
