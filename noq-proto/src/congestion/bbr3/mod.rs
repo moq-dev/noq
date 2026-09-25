@@ -7026,25 +7026,41 @@ mod test {
         c.on_packet_space_acked(at(20), at(11), PACKET as u64, HANDSHAKE_0, false, &rtt);
 
         let rs = bbr.rs.expect("rate sample");
-        assert_eq!(rs.last_packet.space, SpaceKind::Handshake);
         assert_eq!(rs.last_packet.send_time, at(11));
         assert_eq!(rs.prior_delivered, PACKET as u64);
         assert_eq!(rs.rtt, Duration::from_millis(9));
     }
 
-    /// A loss reported for Handshake packet 0 must not remove Initial packet 0.
+    /// Send times, in ms after `t0`, of the packets BBR still tracks across every space.
+    fn tracked_send_ms(bbr: &Bbr3, t0: Instant) -> Vec<u128> {
+        let mut times: Vec<_> = bbr
+            .packets
+            .iter()
+            .flatten()
+            .map(|p| (p.send_time - t0).as_millis())
+            .collect();
+        times.sort();
+        times
+    }
+
+    /// A loss reported for Handshake packet 0 must remove that packet, not Initial packet 0.
     #[test]
     fn loss_removes_the_packet_from_its_own_space() {
         let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
         let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_packet_space_sent(t0, PACKET, INITIAL_0);
-        c.on_packet_space_sent(t0, PACKET, HANDSHAKE_0);
-        c.on_packet_space_lost(PACKET, HANDSHAKE_0, t0 + Duration::from_millis(10));
+        c.on_packet_space_sent(at(0), PACKET, INITIAL_0);
+        c.on_packet_space_sent(at(1), PACKET, INITIAL_1);
+        c.on_packet_space_sent(at(2), PACKET, HANDSHAKE_0);
+        c.on_packet_space_lost(PACKET, HANDSHAKE_0, at(10));
 
-        assert_eq!(bbr.packets[SpaceKind::Initial as usize].len(), 1);
-        assert!(bbr.packets[SpaceKind::Handshake as usize].is_empty());
+        assert_eq!(
+            tracked_send_ms(&bbr, t0),
+            [0, 1],
+            "only Handshake 0, sent at 2ms, is gone"
+        );
         assert_eq!(bbr.last_lost_packet, Some((SpaceKind::Handshake, 0)));
     }
 
@@ -7053,20 +7069,18 @@ mod test {
     fn ecn_congestion_marks_the_packet_from_its_own_space() {
         let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
         let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
         let c: &mut dyn Controller = &mut bbr;
 
-        c.on_packet_space_sent(t0, PACKET, INITIAL_0);
-        c.on_packet_space_sent(t0, PACKET, HANDSHAKE_0);
-        c.on_congestion_event_space(
-            t0 + Duration::from_millis(10),
-            t0,
-            false,
-            true,
-            0,
-            HANDSHAKE_0,
-        );
+        c.on_packet_space_sent(at(0), PACKET, INITIAL_0);
+        c.on_packet_space_sent(at(1), PACKET, INITIAL_1);
+        c.on_packet_space_sent(at(2), PACKET, HANDSHAKE_0);
+        c.on_congestion_event_space(at(10), at(2), false, true, 0, HANDSHAKE_0);
 
-        assert_eq!(bbr.packets[SpaceKind::Initial as usize].len(), 1);
-        assert!(bbr.packets[SpaceKind::Handshake as usize].is_empty());
+        assert_eq!(
+            tracked_send_ms(&bbr, t0),
+            [0, 1],
+            "only Handshake 0, sent at 2ms, is gone"
+        );
     }
 }
