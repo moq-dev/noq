@@ -1731,9 +1731,10 @@ impl Bbr3 {
         };
         rs.interval = Ord::max(rs.send_elapsed, rs.ack_elapsed);
         rs.delivered = self.delivered.saturating_sub(rs.prior_delivered);
-        // An interval shorter than the min RTT is not a reliable rate, but the sample still
-        // advances rounds and the state machine. The min RTT includes this ACK's own sample, as
-        // the transport's does in the draft, so an ACK that lowers the RTT still measures a rate.
+        // An interval shorter than the min RTT is not a reliable rate, so the sample carries no
+        // bandwidth, but it still advances rounds and the state machine as in the draft's
+        // UpdateOnACK. The min RTT includes this ACK's own sample, as the transport's does in the
+        // draft, so an ACK that lowers the RTT still measures a rate.
         // <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
         let reliable = rs.interval >= Ord::min(self.min_rtt, rs.rtt);
         if reliable && rs.interval != Duration::ZERO {
