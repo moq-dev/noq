@@ -1302,7 +1302,9 @@ impl Bbr3 {
                 BbrState::ProbeBw(_) => {
                     self.set_pacing_rate_with_gain(1.0);
                 }
-                BbrState::ProbeRtt => {
+                // ProbeRTT's own mark also reads as idle once a late ACK empties a backlogged
+                // window, and the exit conditions the draft checks here include the round.
+                BbrState::ProbeRtt if self.probe_rtt_round_done => {
                     self.check_probe_rtt_done(now);
                 }
                 _ => {}
@@ -7496,6 +7498,48 @@ mod test {
         sim.ack(40 * MS, probe..probe + 1, false);
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
         assert_eq!(sim.bbr.max_bw, 12_000_000.0);
+    }
+
+    /// A backlogged sender whose window a late ACK empties has not gone idle, so ProbeRTT still
+    /// waits out the round after its window was reached before it exits.
+    #[test]
+    fn probe_rtt_waits_its_round_through_an_emptied_window() {
+        let mut sim = probed();
+        let first = sim.pn;
+        sim.send(10 * MS, 100);
+        sim.bbr.probe_rtt_interval = Duration::ZERO;
+        sim.ack(20 * MS, first..first + 40, false);
+        sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+
+        // Inflight reaches the ProbeRTT window, which the sender then fills.
+        sim.ack(22 * MS, first + 40..first + 50, false);
+        assert!(sim.bbr.probe_rtt_done_stamp.is_some());
+        assert_eq!(sim.inflight, sim.bbr.cwnd);
+
+        // One ACK after the ProbeRTT duration delivers the whole window.
+        sim.ack(230 * MS, first + 50..first + 100, false);
+        assert_eq!(sim.inflight, 0);
+        assert!(!sim.bbr.probe_rtt_round_done);
+
+        sim.send(230 * MS, 1);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+        sim.ack(240 * MS, sim.pn - 1..sim.pn, false);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
+    }
+
+    /// A flow that finishes ProbeRTT's round and then goes idle past its duration exits ProbeRTT
+    /// before its next send, restoring the window for the new flight.
+    #[test]
+    fn probe_rtt_exits_on_restart_after_its_round() {
+        let mut sim = probing_rtt();
+        sim.round(20 * MS, 1, 10 * MS);
+        assert!(sim.bbr.probe_rtt_round_done);
+        assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
+
+        sim.starve();
+        sim.send(300 * MS, 1);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Cruise));
     }
 
     /// A sample above the maximum still raises it during ProbeRTT.
