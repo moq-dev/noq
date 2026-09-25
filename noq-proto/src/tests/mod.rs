@@ -4785,10 +4785,22 @@ fn send_quantum_bounds_the_gso_batch() {
 /// A per-packet congestion callback, as the transport reported it.
 #[derive(Debug, Clone, Copy)]
 enum PacketEvent {
-    Sent { at: Instant, packet: PacketId },
-    Acked { sent: Instant, packet: PacketId },
-    Lost { packet: PacketId },
-    Congestion { largest: PacketId, ecn: bool },
+    Sent {
+        at: Instant,
+        packet: PacketId,
+    },
+    Acked {
+        sent: Instant,
+        packet: PacketId,
+    },
+    Lost {
+        packet: PacketId,
+    },
+    Congestion {
+        sent: Instant,
+        largest: PacketId,
+        ecn: bool,
+    },
 }
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
@@ -4829,13 +4841,14 @@ impl Controller for PacketRecorder {
     fn on_congestion_event_space(
         &mut self,
         _now: Instant,
-        _sent: Instant,
+        sent: Instant,
         _is_persistent_congestion: bool,
         is_ecn: bool,
         _lost_bytes: u64,
         largest_lost: PacketId,
     ) {
         self.push(PacketEvent::Congestion {
+            sent,
             largest: largest_lost,
             ecn: is_ecn,
         });
@@ -4875,12 +4888,14 @@ impl ControllerFactory for PacketRecorderFactory {
 }
 
 /// Asserts every ACK, loss, and congestion event in one controller's log names a packet that
-/// controller sent, with the ACK carrying that packet's own send time, and no packet is resolved
-/// twice. Returns the log for scenario-specific checks.
+/// controller sent, ACKs and congestion events carry that packet's own send time, a loss-driven
+/// congestion event ends with a packet just reported lost, and no packet is resolved twice.
+/// Returns the log for scenario-specific checks.
 fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
     let events = log.lock().unwrap().clone();
     let mut sent = HashMap::new();
     let mut resolved = HashSet::new();
+    let mut lost = HashSet::new();
     for event in &events {
         match *event {
             PacketEvent::Sent { at, packet } => {
@@ -4897,11 +4912,21 @@ fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
             PacketEvent::Lost { packet } => {
                 assert!(sent.contains_key(&packet), "{packet:?} lost but never sent");
                 assert!(resolved.insert(packet), "{packet:?} resolved twice");
+                lost.insert(packet);
             }
-            PacketEvent::Congestion { largest, .. } => {
+            PacketEvent::Congestion {
+                sent: at,
+                largest,
+                ecn,
+            } => {
+                assert_eq!(
+                    sent.get(&largest),
+                    Some(&at),
+                    "{largest:?} congested with another send time"
+                );
                 assert!(
-                    sent.contains_key(&largest),
-                    "{largest:?} congested but never sent"
+                    ecn || lost.contains(&largest),
+                    "{largest:?} congested but not lost"
                 );
             }
         }
@@ -4982,9 +5007,44 @@ fn congestion_callbacks_identify_packets_across_spaces() {
     );
     assert!(
         events.iter().any(
-            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true } if largest.space != Space::Data)
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: false, .. } if largest.space != Space::Data)
+        ),
+        "no handshake loss congestion reported"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true, .. } if largest.space != Space::Data)
         ),
         "no handshake ECN congestion reported"
+    );
+}
+
+/// A Retry acknowledges the client's first Initial packet without an ACK frame. That inferred
+/// ACK must name Initial 0 too, not packet 0 of another space.
+#[test]
+fn congestion_callbacks_identify_the_initial_a_retry_acks() {
+    let _guard = subscribe();
+    let factory = Arc::new(PacketRecorderFactory::default());
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(factory.clone());
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    pair.server.handle_incoming = Box::new(validate_incoming);
+    pair.connect_with(client_cfg);
+
+    let logs = factory.logs.lock().unwrap().clone();
+    assert_eq!(logs.len(), 1, "only the client records");
+    let initial_0 = PacketId {
+        space: Space::Initial,
+        number: 0,
+    };
+    assert!(
+        check_packet_identity(&logs[0])
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if *packet == initial_0)),
+        "the Retry did not ack Initial 0"
     );
 }
 
