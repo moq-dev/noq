@@ -174,7 +174,7 @@ enum BbrState {
 }
 
 /// Ack phases used during ProbeBW states
-/// equivalent to BBR.ack_phase states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6>
+/// equivalent to BBR.ack_phase states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.14>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum AckPhase {
     /// equivalent to ACKS_INIT
@@ -530,7 +530,7 @@ pub struct Bbr3 {
     cycle_stamp: Option<Instant>,
     /// equivalent to BBR.ack_phase: ACK phase during probing states
     ack_phase: AckPhase,
-    /// equivalent to BBR.bw_probe_samples: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2>
+    /// equivalent to BBR.is_bw_probe_sample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.14>
     bw_probe_samples: bool,
     /// equivalent to BBR.loss_round_delivered: C.delivered during the first loss of the round
     loss_round_delivered: u64,
@@ -997,7 +997,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// The probe's feedback ends once, on the first round after it stops, so later losses are not
     /// taken as probe feedback and later rounds do not age the max-bw window again.
@@ -1113,7 +1113,7 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// Growing in whole packets lets the cwnd catch up between increments, so PROBE_UP sees the
     /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it.
@@ -1270,7 +1270,7 @@ impl Bbr3 {
         self.full_bw_now = false;
     }
 
-    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.6-8>
+    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     fn raise_inflight_long_term_slope(&mut self) {
         let growth_this_round = 1u64
             .checked_shl(self.bw_probe_up_rounds)
@@ -4993,7 +4993,7 @@ mod test {
 
     /// A.15: Increasing bandwidth 10x and ensuring full bandwidth is reached.
     /// equivalent to BBRRaiseInflightLongtermSlope / BBRProbeInflightLongtermUpward:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// After PROBE_BW is reached at a low link rate, the bottleneck bandwidth jumps 10x. In
     /// PROBE_UP BBR grows `inflight_longterm` with an exponentially increasing per-round step so
