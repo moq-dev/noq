@@ -1837,6 +1837,9 @@ impl Bbr3 {
     /// equivalent to BBRHandleSpuriousLossDetection: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.11.2>
     fn on_spurious_congestion_event(&mut self) {
         self.restore_cwnd();
+        // No ACK processing may follow to re-bound the window, as when the ACK covers only
+        // packets declared lost. ProbeRTT's exit restores the rest.
+        self.bound_cwnd_for_probe_rtt();
         self.loss_in_round = false;
         self.reset_full_bw();
         self.bw_shortterm = [self.bw_shortterm, self.undo_bw_shortterm]
@@ -7559,8 +7562,8 @@ mod test {
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
     }
 
-    /// ProbeRTT entered during a recovery episode keeps the episode's saved window, so undoing
-    /// the episode still restores it.
+    /// ProbeRTT entered during a recovery episode keeps the episode's saved window: undoing the
+    /// episode keeps ProbeRTT's bound, and ProbeRTT's exit restores the window.
     #[test]
     fn probe_rtt_keeps_the_episode_window() {
         let mut sim = probing_up();
@@ -7571,11 +7574,20 @@ mod test {
         // The min RTT expires on the following ACK.
         sim.bbr.probe_rtt_interval = Duration::ZERO;
         sim.ack(21 * MS, 12..20, false);
+        sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
         assert!(sim.bbr.in_recovery);
+        let bound = sim.bbr.probe_rtt_cwnd();
 
         sim.bbr.on_spurious_congestion_event();
-        assert_eq!(sim.bbr.cwnd, 20_000);
+        assert_eq!(sim.bbr.cwnd, bound);
+        let mut now = 30 * MS;
+        while sim.bbr.state == BbrState::ProbeRtt {
+            sim.round(now, 1, 10 * MS);
+            now += 10 * MS;
+            assert!(now < 1000 * MS, "ProbeRTT never ended");
+        }
+        assert!(sim.bbr.cwnd >= 20_000);
     }
 
     /// Undoing a Startup high-loss exit from within ProbeRTT stays in ProbeRTT, which then
