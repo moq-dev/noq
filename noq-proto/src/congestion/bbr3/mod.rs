@@ -258,9 +258,6 @@ struct BbrRateSample {
     /// that has just been ACKed (the most recently sent packet among packets ACKed by the ACK
     /// that was just received).
     tx_in_flight: u64,
-    /// equivalent to RS.newly_acked: The volume of data in bytes cumulatively or selectively
-    /// acknowledged upon the ACK that was just received.
-    newly_acked: u64,
     /// equivalent to RS.lost: The volume of data in bytes that was declared lost between the
     /// transmission and acknowledgment of the packet that has just been ACKed (the most
     /// recently sent packet among packets ACKed by the ACK that was just received).
@@ -510,7 +507,8 @@ pub struct Bbr3 {
     /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
     /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
     rs_has_data: bool,
-    /// equivalent to RS.newly_acked, accumulated over the ACK being processed.
+    /// equivalent to RS.newly_acked, accumulated over the ACK being processed. It is passed to
+    /// the ACK's model steps rather than kept in `rs`, so no later `set_cwnd` counts it again.
     newly_acked: u64,
     /// equivalent to BBR.rounds_since_bw_probe: rounds since last bw probe state.
     rounds_since_bw_probe: u64,
@@ -715,14 +713,14 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
-    fn update_model_and_state(&mut self, p: BbrPacket, now: Instant) {
+    fn update_model_and_state(&mut self, p: BbrPacket, newly_acked: u64, now: Instant) {
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
-        self.update_ack_aggregation(now);
+        self.update_ack_aggregation(newly_acked, now);
         self.check_full_bw_reached();
         self.check_startup_done();
         self.check_drain_done(now);
-        self.update_probe_bw_cycle_phase(now);
+        self.update_probe_bw_cycle_phase(newly_acked, now);
         self.update_min_rtt(now);
         self.check_probe_rtt(now);
         self.advance_latest_delivery_signals();
@@ -825,7 +823,7 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateACKAggregation <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.9>
-    fn update_ack_aggregation(&mut self, now: Instant) {
+    fn update_ack_aggregation(&mut self, newly_acked: u64, now: Instant) {
         let interval;
         if let Some(extra_acked_interval_start) = self.extra_acked_interval_start {
             interval = now - extra_acked_interval_start;
@@ -838,9 +836,7 @@ impl Bbr3 {
             self.extra_acked_interval_start = Some(now);
             expected_delivered = 0;
         }
-        if let Some(rate_sample) = self.rs {
-            self.extra_acked_delivered += rate_sample.newly_acked;
-        }
+        self.extra_acked_delivered += newly_acked;
 
         let mut extra = self
             .extra_acked_delivered
@@ -968,11 +964,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateProbeBWCyclePhase <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-6>
-    fn update_probe_bw_cycle_phase(&mut self, now: Instant) {
+    fn update_probe_bw_cycle_phase(&mut self, newly_acked: u64, now: Instant) {
         if !self.full_bw_reached {
             return;
         }
-        self.adapt_long_term_model();
+        self.adapt_long_term_model(newly_acked);
         let state = self.state;
         match state {
             BbrState::ProbeBw(ProbeBwSubstate::Down) => {
@@ -997,7 +993,7 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
-    fn adapt_long_term_model(&mut self) {
+    fn adapt_long_term_model(&mut self, newly_acked: u64) {
         if self.ack_phase == AckPhase::ProbeStarting && self.round_start {
             self.ack_phase = AckPhase::ProbeFeedback;
         }
@@ -1019,7 +1015,7 @@ impl Bbr3 {
                 self.inflight_longterm = rate_sample.tx_in_flight;
             }
             if self.state == BbrState::ProbeBw(ProbeBwSubstate::Up) {
-                self.probe_inflight_long_term_upward();
+                self.probe_inflight_long_term_upward(newly_acked);
             }
         }
     }
@@ -1108,13 +1104,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
-    fn probe_inflight_long_term_upward(&mut self) {
+    fn probe_inflight_long_term_upward(&mut self, newly_acked: u64) {
         if !self.is_cwnd_limited || self.cwnd < self.inflight_longterm {
             return;
         }
-        if let Some(rate_sample) = self.rs {
-            self.bw_probe_up_acks += rate_sample.newly_acked;
-        }
+        self.bw_probe_up_acks += newly_acked;
         if self.bw_probe_up_acks >= self.probe_up_cnt && self.probe_up_cnt > 0 {
             let delta = self.bw_probe_up_acks / self.probe_up_cnt;
             self.bw_probe_up_acks -= delta * self.probe_up_cnt;
@@ -1330,25 +1324,19 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateControlParameters <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
-    fn update_control_parameters(&mut self) {
+    fn update_control_parameters(&mut self, newly_acked: u64) {
         self.set_pacing_rate();
         self.set_send_quantum();
-        self.set_cwnd();
+        self.set_cwnd(newly_acked);
     }
 
     /// equivalent to BBRSetCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.6>
-    fn set_cwnd(&mut self) {
+    fn set_cwnd(&mut self, newly_acked: u64) {
         self.update_max_inflight();
         if self.full_bw_reached {
-            if let Some(rate_sample) = self.rs {
-                self.cwnd = Ord::min(self.cwnd + rate_sample.newly_acked, self.max_inflight);
-            } else {
-                self.cwnd = Ord::min(self.cwnd, self.max_inflight);
-            }
-        } else if (self.cwnd < self.max_inflight || self.delivered < self.initial_cwnd)
-            && let Some(rate_sample) = self.rs
-        {
-            self.cwnd += rate_sample.newly_acked;
+            self.cwnd = Ord::min(self.cwnd + newly_acked, self.max_inflight);
+        } else if self.cwnd < self.max_inflight || self.delivered < self.initial_cwnd {
+            self.cwnd += newly_acked;
         }
         self.cwnd = Ord::max(self.cwnd, self.min_pipe_cwnd);
         self.bound_cwnd_for_probe_rtt();
@@ -1699,7 +1687,6 @@ impl Bbr3 {
             ack_elapsed: now - p.delivered_time,
             rtt: now - p.send_time,
             tx_in_flight: p.tx_in_flight,
-            newly_acked: 0,
             lost: self.lost.saturating_sub(p.lost),
             last_end_seq: packet_number,
             last_packet: p,
@@ -1742,7 +1729,6 @@ impl Bbr3 {
         let Some(mut rs) = self.rs else {
             return;
         };
-        rs.newly_acked = newly_acked;
         rs.interval = Ord::max(rs.send_elapsed, rs.ack_elapsed);
         rs.delivered = self.delivered.saturating_sub(rs.prior_delivered);
         // An interval shorter than the min RTT is not a reliable rate, but the sample still
@@ -1754,8 +1740,8 @@ impl Bbr3 {
             rs.delivery_rate = rs.delivered as f64 / rs.interval.as_secs_f64();
         }
         self.rs = Some(rs);
-        self.update_model_and_state(rs.last_packet, now);
-        self.update_control_parameters();
+        self.update_model_and_state(rs.last_packet, newly_acked, now);
+        self.update_control_parameters(newly_acked);
     }
 
     fn on_congestion_event(
@@ -1824,7 +1810,7 @@ impl Bbr3 {
         );
         self.min_pipe_cwnd = 4 * self.smss;
         self.set_send_quantum();
-        self.set_cwnd();
+        self.set_cwnd(0);
     }
 
     fn on_ack_frequency_update(
@@ -3646,7 +3632,7 @@ mod test {
         // past cycle_stamp + bw_probe_wait (has_elapsed_in_phase is a strict `>`) and
         // drive one cycle-phase step.
         bbr.probe_rtt_min_stamp = Some(fire_at);
-        bbr.update_probe_bw_cycle_phase(fire_at);
+        bbr.update_probe_bw_cycle_phase(0, fire_at);
 
         // A single cycle step took PROBE_DOWN straight to PROBE_REFILL, bypassing
         // PROBE_CRUISE, because update_probe_bw_cycle_phase checks BBRIsTimeToProbeBW
@@ -7183,6 +7169,18 @@ mod test {
         sim.ack(15 * MS, [], false);
         assert_eq!(sim.bbr.round_count, round_count);
         assert_eq!(sim.bbr.max_bw, 120_000.0);
+    }
+
+    /// An MTU change between ACKs does not grow cwnd by the last ACK's bytes again.
+    #[test]
+    fn mtu_update_reuses_no_acked_bytes() {
+        let mut sim = scripted();
+        sim.send(0, 10);
+        sim.ack(10 * MS, 0..10, false);
+        let cwnd = sim.bbr.cwnd;
+
+        sim.bbr.on_mtu_update(1200);
+        assert_eq!(sim.bbr.cwnd, cwnd);
     }
 
     /// After an idle period, the first ACK measures the resumed burst, not the pre-idle sample.
