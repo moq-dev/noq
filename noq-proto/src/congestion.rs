@@ -35,14 +35,15 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     fn on_sent(&mut self, now: Instant, bytes: u64, largest_pn: u64) {}
 
     /// One packet was just sent
-    ///
-    /// The transport calls [`Self::on_packet_space_sent`] instead, whose default forwards here
-    /// without the space. Kept for compatibility until a major release removes it.
+    #[deprecated(note = "implement `on_packet_space_sent`, which also names the packet's space")]
     #[allow(unused_variables)]
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, pn: u64) {}
 
     /// One packet was just sent, identified by its space and number
+    ///
+    /// Defaults to the deprecated [`Self::on_packet_sent`], dropping the space.
     fn on_packet_space_sent(&mut self, now: Instant, bytes: u16, packet: PacketId) {
+        #[allow(deprecated)]
         self.on_packet_sent(now, bytes, packet.number);
     }
 
@@ -53,12 +54,7 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     fn on_cwnd_limited(&mut self) {}
 
     /// Packet deliveries were confirmed
-    ///
-    /// `app_limited` indicates whether the connection was blocked on outgoing
-    /// application data prior to receiving these acknowledgements.
-    ///
-    /// The transport calls [`Self::on_packet_space_acked`] instead, whose default forwards here
-    /// without the space. Kept for compatibility until a major release removes it.
+    #[deprecated(note = "implement `on_packet_space_acked`, which also names the packet's space")]
     #[allow(unused_variables)]
     fn on_ack(
         &mut self,
@@ -73,7 +69,10 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
 
     /// One packet's delivery was confirmed, identified by its space and number
     ///
-    /// The arguments otherwise match [`Self::on_ack`].
+    /// `app_limited` indicates whether the connection was blocked on outgoing
+    /// application data prior to receiving these acknowledgements.
+    ///
+    /// Defaults to the deprecated [`Self::on_ack`], dropping the space.
     fn on_packet_space_acked(
         &mut self,
         now: Instant,
@@ -83,6 +82,7 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
         app_limited: bool,
         rtt: &RttEstimator,
     ) {
+        #[allow(deprecated)]
         self.on_ack(now, sent, bytes, packet.number, app_limited, rtt);
     }
 
@@ -99,16 +99,10 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     }
 
     /// Packets were deemed lost or marked congested
-    ///
-    /// `in_persistent_congestion` indicates whether all packets sent within the persistent
-    /// congestion threshold period ending when the most recent packet in this batch was sent were
-    /// lost.
-    /// `lost_bytes` indicates how many bytes were lost. This value will be 0 for ECN triggers.
-    /// `largest_lost_pn` indicates the packet number of the packet with the highest packet number
-    /// in the congestion event.
-    ///
-    /// The transport calls [`Self::on_congestion_event_space`] instead, whose default forwards here
-    /// without the space. Kept for compatibility until a major release removes it.
+    #[deprecated(
+        note = "implement `on_congestion_event_space`, which also names the packet's space"
+    )]
+    #[allow(unused_variables)]
     fn on_congestion_event(
         &mut self,
         now: Instant,
@@ -117,11 +111,19 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
         is_ecn: bool,
         lost_bytes: u64,
         largest_lost_pn: u64,
-    );
+    ) {
+    }
 
-    /// Packets were deemed lost or marked congested, ending with the `largest_lost` packet
+    /// Packets were deemed lost or marked congested
     ///
-    /// The arguments otherwise match [`Self::on_congestion_event`].
+    /// `is_persistent_congestion` indicates whether all packets sent within the persistent
+    /// congestion threshold period ending when the most recent packet in this batch was sent were
+    /// lost.
+    /// `lost_bytes` indicates how many bytes were lost. This value will be 0 for ECN triggers.
+    /// `largest_lost` identifies the packet with the highest packet number in the congestion
+    /// event.
+    ///
+    /// Defaults to the deprecated [`Self::on_congestion_event`], dropping the space.
     fn on_congestion_event_space(
         &mut self,
         now: Instant,
@@ -131,6 +133,7 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
         lost_bytes: u64,
         largest_lost: PacketId,
     ) {
+        #[allow(deprecated)]
         self.on_congestion_event(
             now,
             sent,
@@ -142,14 +145,15 @@ pub trait Controller: Send + Sync + std::fmt::Debug {
     }
 
     /// One packet was just lost
-    ///
-    /// The transport calls [`Self::on_packet_space_lost`] instead, whose default forwards here
-    /// without the space. Kept for compatibility until a major release removes it.
+    #[deprecated(note = "implement `on_packet_space_lost`, which also names the packet's space")]
     #[allow(unused_variables)]
     fn on_packet_lost(&mut self, lost_bytes: u16, pn: u64, now: Instant) {}
 
     /// One packet was just lost, identified by its space and number
+    ///
+    /// Defaults to the deprecated [`Self::on_packet_lost`], dropping the space.
     fn on_packet_space_lost(&mut self, lost_bytes: u16, packet: PacketId, now: Instant) {
+        #[allow(deprecated)]
         self.on_packet_lost(lost_bytes, packet.number, now);
     }
 
