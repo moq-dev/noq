@@ -515,6 +515,9 @@ pub struct Bbr3 {
     /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
     /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
     rs_has_data: bool,
+    /// Whether the last ACK delivered a tracked packet, so `rs` describes it. A CE event is
+    /// reported after its ACK ends, and an ACK of only untracked packets leaves an older `rs`.
+    rs_from_last_ack: bool,
     /// equivalent to RS.newly_acked, accumulated over the ACK being processed. It is passed to
     /// the ACK's model steps rather than kept in `rs`, so no later `set_cwnd` counts it again.
     newly_acked: u64,
@@ -696,6 +699,7 @@ impl Bbr3 {
             lost: 0,
             rs: None,
             rs_has_data: false,
+            rs_from_last_ack: false,
             newly_acked: 0,
             packets: Default::default(),
             rounds_since_bw_probe: 0,
@@ -1556,7 +1560,7 @@ impl Bbr3 {
             if self.is_inflight_too_high() {
                 rate_sample.tx_in_flight = self.inflight_at_loss(p.size as u64);
                 self.rs = Some(rate_sample);
-                self.handle_inflight_too_high(now);
+                self.handle_inflight_too_high(now, self.rs);
             }
         }
         self.packets[space as usize].remove(packet_index);
@@ -1594,9 +1598,10 @@ impl Bbr3 {
     ///
     /// Draft-06 section 3.7 requires treating CE as congestion without prescribing BBR's
     /// response. As RFC 9002 reduces its window once per recovery period, this responds once per
-    /// recovery episode: Startup stops as it does on high loss, a bandwidth probe stops as it
-    /// does when loss shows inflight too high, and every other state lowers its short-term
-    /// model at the end of the round, as it does for loss. A mark loses no data, so it adds no
+    /// recovery episode: Startup stops as it does on high loss, a bandwidth probe whose feedback
+    /// is arriving stops as it does when loss shows inflight too high, and every other state
+    /// lowers its short-term model at the end of the round, as it does for loss. A mark loses no
+    /// data, so it adds no
     /// lost bytes or loss events, and the transport reports only an increased CE count, so old
     /// marks never repeat the response.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-3.7>
@@ -1615,19 +1620,12 @@ impl Bbr3 {
                 self.full_bw_now = true;
                 self.enter_drain();
             }
-            BbrState::ProbeBw(ProbeBwSubstate::Refill | ProbeBwSubstate::Up) => {
-                // As handle_inflight_too_high, bounded by the inflight that drew the marks: the
-                // marked ACK's rate sample. The event's own packet may be an untracked ACK-only
-                // packet.
-                if let Some(rs) = self.rs
-                    && !rs.is_app_limited
-                {
-                    self.inflight_longterm = Ord::max(
-                        rs.tx_in_flight,
-                        (self.target_inflight() as f64 * BETA) as u64,
-                    );
-                }
-                self.start_probe_bw_down(now);
+            // The marked ACK's sample bounds the probe, since the event's own packet can be an
+            // untracked ACK-only one. The probe's feedback can still be arriving after the ACK
+            // itself ended the probe.
+            _ if self.bw_probe_samples => {
+                let rs = self.rs.filter(|_| self.rs_from_last_ack);
+                self.handle_inflight_too_high(now, rs);
             }
             _ => {}
         }
@@ -1672,9 +1670,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRHandleInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-1>
-    fn handle_inflight_too_high(&mut self, now: Instant) {
+    ///
+    /// `rs` is the sample that showed it, if any.
+    fn handle_inflight_too_high(&mut self, now: Instant, rs: Option<BbrRateSample>) {
         self.bw_probe_samples = false;
-        if let Some(rate_sample) = self.rs
+        if let Some(rate_sample) = rs
             && !rate_sample.is_app_limited
         {
             self.inflight_longterm = Ord::max(
@@ -1855,7 +1855,8 @@ impl Bbr3 {
         let newly_acked = std::mem::take(&mut self.newly_acked);
         // An ACK that delivered no tracked packet has no sample, and a finished one is never
         // folded twice.
-        if !std::mem::take(&mut self.rs_has_data) {
+        self.rs_from_last_ack = std::mem::take(&mut self.rs_has_data);
+        if !self.rs_from_last_ack {
             return;
         }
         let Some(mut rs) = self.rs else {
@@ -8029,6 +8030,32 @@ mod test {
             .on_congestion_event(now, now, false, true, 0, 1000, SpaceKind::Data);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
         assert_eq!(sim.bbr.inflight_longterm, 12_000);
+    }
+
+    /// CE on the ACK that itself ends the probe still bounds it, as the probe's feedback is
+    /// still arriving.
+    #[test]
+    fn ce_on_the_probe_ending_ack_bounds_inflight() {
+        let mut sim = probing_up();
+        // This ACK finds the bandwidth plateau and leaves ProbeUp before its CE is reported.
+        sim.bbr.full_bw_now = true;
+        sim.ack_ce(20 * MS, 10..20);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        assert_eq!(sim.bbr.inflight_longterm, 12_000);
+    }
+
+    /// CE on an ACK of only untracked packets stops the probe without bounding it by an older
+    /// ACK's sample.
+    #[test]
+    fn ce_without_a_sample_keeps_the_bound() {
+        let mut sim = probing_up();
+        let now = sim.at(20 * MS);
+        sim.bbr
+            .on_end_acks(now, sim.inflight, false, Some(1000), SpaceKind::Data);
+        sim.bbr
+            .on_congestion_event(now, now, false, true, 0, 1000, SpaceKind::Data);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        assert_eq!(sim.bbr.inflight_longterm, 100_000);
     }
 
     /// A scripted `Sim` cruising after a loss-free probe of 12 MB/s over a 10ms RTT.
