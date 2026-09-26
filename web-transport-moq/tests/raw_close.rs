@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 use rcgen::{CertifiedKey, KeyPair};
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::time::timeout;
-use web_transport_moq::{generic, noq, Session};
+use web_transport_moq::{noq, Session};
 
 /// With both crypto features enabled, as `--all-features` does, the crate cannot pick a
 /// provider for us, so the test installs one.
@@ -48,7 +48,7 @@ async fn raw_pair() -> Result<(Session, Session, [noq::Endpoint; 2])> {
     ))
 }
 
-fn assert_code(err: &impl generic::Error, code: u32) {
+fn assert_code(err: &impl web_transport_trait::Error, code: u32) {
     assert_eq!(
         err.session_error(),
         Some((code, "kicked".to_string())),
