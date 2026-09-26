@@ -1600,7 +1600,7 @@ impl Bbr3 {
     /// lost bytes or loss events, and the transport reports only an increased CE count, so old
     /// marks never repeat the response.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-3.7>
-    fn handle_ce(&mut self, now: Instant, sent: Instant, space: SpaceKind, packet_number: u64) {
+    fn handle_ce(&mut self, now: Instant, sent: Instant) {
         self.enter_recovery(now, sent);
         if std::mem::replace(&mut self.ce_in_recovery, true) {
             return;
@@ -1616,13 +1616,14 @@ impl Bbr3 {
                 self.enter_drain();
             }
             BbrState::ProbeBw(ProbeBwSubstate::Refill | ProbeBwSubstate::Up) => {
-                // As handle_inflight_too_high, bounded by the inflight that drew the marks.
-                let packets = &self.packets[space as usize];
-                if let Ok(i) = packets.binary_search_by_key(&packet_number, |p| p.packet_number)
-                    && !packets[i].is_app_limited
+                // As handle_inflight_too_high, bounded by the inflight that drew the marks: the
+                // marked ACK's rate sample. The event's own packet may be an untracked ACK-only
+                // packet.
+                if let Some(rs) = self.rs
+                    && !rs.is_app_limited
                 {
                     self.inflight_longterm = Ord::max(
-                        packets[i].tx_in_flight,
+                        rs.tx_in_flight,
                         (self.target_inflight() as f64 * BETA) as u64,
                     );
                 }
@@ -1883,12 +1884,12 @@ impl Bbr3 {
         is_persistent_congestion: bool,
         is_ecn: bool,
         _lost_bytes: u64,
-        largest_pn: u64,
-        space: SpaceKind,
+        _largest_lost_pn: u64,
+        _space: SpaceKind,
     ) {
         // Loss is handled per packet in on_packet_lost, so only CE is handled here.
         if is_ecn {
-            self.handle_ce(now, sent, space, largest_pn);
+            self.handle_ce(now, sent);
         }
         if is_persistent_congestion {
             self.cwnd = self.min_pipe_cwnd;
@@ -7934,14 +7935,11 @@ mod test {
         assert_eq!(bbr.last_lost_packet, Some((SpaceKind::Handshake, 0)));
     }
 
-    /// An ECN congestion event names its largest packet by space: a probe it stops is bounded by
-    /// the inflight Handshake packet 0 was sent with, not Initial packet 0's. A mark loses
-    /// nothing, so every packet stays tracked.
+    /// A CE mark loses nothing, so the packet an ECN congestion event names stays tracked,
+    /// where it was once removed as lost.
     #[test]
-    fn ecn_congestion_reads_the_packet_from_its_own_space() {
+    fn ce_keeps_the_marked_packet_tracked() {
         let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
-        bbr.full_bw_reached = true;
-        bbr.start_probe_bw_up();
         let t0 = Instant::now();
         let at = |ms| t0 + Duration::from_millis(ms);
         let c: &mut dyn Controller = &mut bbr;
@@ -7951,9 +7949,8 @@ mod test {
         c.on_packet_space_sent(at(2), PACKET, HANDSHAKE_0);
         c.on_congestion_event_space(at(10), at(2), false, true, 0, HANDSHAKE_0);
 
-        assert_eq!(bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
-        assert_eq!(bbr.inflight_longterm, 3 * PACKET as u64);
         assert_eq!(tracked_send_ms(&bbr, t0), [0, 1, 2]);
+        assert_eq!(bbr.lost, 0);
     }
 
     /// Rounds of 1, 2, 4, ..., 128 packets, 20ms apart, each acknowledged 10ms after it is sent,
@@ -8019,6 +8016,19 @@ mod test {
         assert!(marked.bbr.window() <= 12_000);
         assert!(marked.bbr.window() < control.bbr.window());
         assert!(marked.bbr.pacing_rate < control.bbr.pacing_rate);
+    }
+
+    /// The transport names the ACK's largest packet, which can be an ACK-only packet BBR never
+    /// tracked; the probe is still bounded, by the ACK's rate sample.
+    #[test]
+    fn probe_up_ce_on_an_untracked_packet_bounds_inflight() {
+        let mut sim = probing_up();
+        sim.ack(20 * MS, 10..20, false);
+        let now = sim.at(20 * MS);
+        sim.bbr
+            .on_congestion_event(now, now, false, true, 0, 1000, SpaceKind::Data);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        assert_eq!(sim.bbr.inflight_longterm, 12_000);
     }
 
     /// A scripted `Sim` cruising after a loss-free probe of 12 MB/s over a 10ms RTT.
