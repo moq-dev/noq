@@ -1,13 +1,13 @@
 use std::{
     io,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use bytes::{Buf, Bytes};
 
-use crate::{ClosedStream, SessionError, WriteError};
+use crate::{CloseReason, ClosedStream, SessionError, WriteError};
 
 /// A stream that can be used to send bytes. See [`noq::SendStream`].
 ///
@@ -16,23 +16,20 @@ use crate::{ClosedStream, SessionError, WriteError};
 #[derive(Debug)]
 pub struct SendStream {
     stream: noq::SendStream,
-    error: Arc<OnceLock<SessionError>>,
+    close: Arc<CloseReason>,
 }
 
 impl SendStream {
-    pub(crate) fn new(stream: noq::SendStream, error: Arc<OnceLock<SessionError>>) -> Self {
-        Self { stream, error }
+    pub(crate) fn new(stream: noq::SendStream, close: Arc<CloseReason>) -> Self {
+        Self { stream, close }
     }
 
-    /// Replace connection-level errors with the stored session error if available.
+    /// Report a session error as the session's close reason.
     fn map_error(&self, e: impl Into<WriteError>) -> WriteError {
-        let e = e.into();
-        if let Some(err) = self.error.get() {
-            if matches!(&e, WriteError::SessionError(_)) {
-                return WriteError::SessionError(err.clone());
-            }
+        match e.into() {
+            WriteError::SessionError(e) => WriteError::SessionError(self.close.map(e)),
+            e => e,
         }
-        e
     }
 
     /// Abruptly reset the stream with the provided error code. See [`noq::SendStream::reset`].
@@ -54,7 +51,7 @@ impl SendStream {
             Ok(Some(code)) => Ok(web_transport_proto::error_from_http3(code.into_inner())),
             Ok(None) => Ok(None),
             Err(noq::StoppedError::ConnectionLost(conn_err)) => {
-                Err(self.error.get().cloned().unwrap_or_else(|| conn_err.into()))
+                Err(self.close.map(conn_err.into()))
             }
             Err(noq::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
         }
