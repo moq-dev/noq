@@ -15,7 +15,8 @@ use kio::{Fan, Waiter};
 
 use crate::{
     proto::{ConnectRequest, ConnectResponse, Frame, StreamUni, VarInt},
-    ClientError, Connected, RecvStream, SendStream, SessionError, Settings, WebTransportError,
+    ClientError, CloseReason, Connected, RecvStream, SendStream, SessionError, Settings,
+    WebTransportError,
 };
 
 /// The ALPN the QUIC handshake negotiated, or `None` if there was none, the handshake
@@ -77,10 +78,9 @@ pub struct Session {
     // Wrapped in Arc<Mutex<Option<...>>> so close() can take it exactly once.
     connect_send: Arc<Mutex<Option<noq::SendStream>>>,
 
-    // Session error, set once by either local close() or the background task
+    // Why the session closed: set once by a local close() or the background task
     // when a remote CloseWebTransportSession capsule is received.
-    // Uses OnceLock for set-once, first-writer-wins semantics with lock-free reads.
-    error: Arc<OnceLock<SessionError>>,
+    close: Arc<CloseReason>,
 
     // The request sent by the client, or None for a raw QUIC session.
     request: Option<ConnectRequest>,
@@ -118,10 +118,10 @@ impl Session {
         let mut header_datagram = Vec::new();
         session_id.encode(&mut header_datagram);
 
-        let error: Arc<OnceLock<SessionError>> = Arc::new(OnceLock::new());
+        let close = Arc::new(CloseReason::new(false));
 
         // Accept logic is stateful, so use an Arc<Mutex> to share it.
-        let accept = SessionAccept::new(conn.clone(), session_id, error.clone());
+        let accept = SessionAccept::new(conn.clone(), session_id, close.clone());
 
         let this = Self {
             conn,
@@ -132,7 +132,7 @@ impl Session {
             header_datagram,
             settings: Some(Arc::new(settings)),
             connect_send: Arc::new(Mutex::new(Some(connect.send))),
-            error: error.clone(),
+            close: close.clone(),
             request: Some(connect.request.clone()),
             response: Some(connect.response.clone()),
             alpn: Default::default(),
@@ -140,18 +140,14 @@ impl Session {
 
         // Run a background task to read capsules from the CONNECT recv stream.
         let conn2 = this.conn.clone();
-        tokio::spawn(Self::run_recv(conn2, connect.recv, error));
+        tokio::spawn(Self::run_recv(conn2, connect.recv, close));
 
         this
     }
 
     // Read capsules from the CONNECT recv stream until it's closed,
     // then record the close error and tear down the connection.
-    async fn run_recv(
-        conn: noq::Connection,
-        recv: noq::RecvStream,
-        error: Arc<OnceLock<SessionError>>,
-    ) {
+    async fn run_recv(conn: noq::Connection, recv: noq::RecvStream, close: Arc<CloseReason>) {
         let close_info = Self::read_capsules(recv).await;
         let code = close_info.as_ref().map_or(0, |(c, _)| *c);
 
@@ -164,14 +160,14 @@ impl Session {
         match close_info {
             Some((code, reason)) => {
                 let err = WebTransportError::Closed(code, reason.clone());
-                if error.set(err.into()).is_err() {
+                if !close.set(err.into()) {
                     return;
                 }
                 conn.close(http3_code, reason.as_bytes());
             }
             None => {
                 let err = noq::ConnectionError::LocallyClosed.into();
-                if error.set(err).is_err() {
+                if !close.set(err) {
                     return;
                 }
                 conn.close(http3_code, b"");
@@ -239,7 +235,7 @@ impl Session {
                 .accept_uni()
                 .await
                 .map_err(|e| self.map_error(e))?;
-            Ok(RecvStream::new(recv, self.error.clone()))
+            Ok(RecvStream::new(recv, self.close.clone()))
         }
     }
 
@@ -252,8 +248,8 @@ impl Session {
         } else {
             let (send, recv) = self.conn.accept_bi().await.map_err(|e| self.map_error(e))?;
             Ok((
-                SendStream::new(send, self.error.clone()),
-                RecvStream::new(recv, self.error.clone()),
+                SendStream::new(send, self.close.clone()),
+                RecvStream::new(recv, self.close.clone()),
             ))
         }
     }
@@ -273,7 +269,7 @@ impl Session {
 
         // Reset the stream priority back to the default of 0.
         send.set_priority(0).ok();
-        Ok(SendStream::new(send, self.error.clone()))
+        Ok(SendStream::new(send, self.close.clone()))
     }
 
     /// Open a new bidirectional stream. See [`noq::Connection::open_bi`].
@@ -292,8 +288,8 @@ impl Session {
         // Reset the stream priority back to the default of 0.
         send.set_priority(0).ok();
         Ok((
-            SendStream::new(send, self.error.clone()),
-            RecvStream::new(recv, self.error.clone()),
+            SendStream::new(send, self.close.clone()),
+            RecvStream::new(recv, self.close.clone()),
         ))
     }
 
@@ -401,11 +397,14 @@ impl Session {
     /// Callers should `await` [`Session::closed()`] to ensure the capsule has been
     /// delivered. Session operations will fail once the QUIC connection is closed.
     pub fn close(&self, code: u32, reason: &[u8]) {
-        // Record the local close error. First writer wins — if the background
-        // task already set a remote close error, or close() was already called,
-        // this is a no-op.
+        // First close wins: a no-op if the connection already closed, the background
+        // task recorded a remote close, or close() was already called.
+        if let Some(err) = self.conn.close_reason() {
+            self.close.set(self.map_error(err));
+            return;
+        }
         let err = SessionError::ConnectionError(noq::ConnectionError::LocallyClosed);
-        if self.error.set(err).is_err() {
+        if !self.close.set(err) {
             return;
         }
 
@@ -503,19 +502,9 @@ impl Session {
         self.conn.close_reason().map(|e| self.map_error(e))
     }
 
-    /// Replace connection-level errors with the stored session error if available.
+    /// Report an error caused by the connection closing as the session's close reason.
     fn map_error(&self, e: impl Into<SessionError>) -> SessionError {
-        let e = e.into();
-        if let Some(err) = self.error.get() {
-            if matches!(
-                &e,
-                SessionError::ConnectionError(_)
-                    | SessionError::SendDatagramError(noq::SendDatagramError::ConnectionLost(_))
-            ) {
-                return err.clone();
-            }
-        }
-        e
+        self.close.map(e.into())
     }
 
     async fn write_full(send: &mut noq::SendStream, buf: &[u8]) -> Result<(), SessionError> {
@@ -545,7 +534,7 @@ impl Session {
             accept: None,
             settings: None,
             connect_send: Arc::new(Mutex::new(None)),
-            error: Arc::new(OnceLock::new()),
+            close: Arc::new(CloseReason::new(true)),
             request: None,
             response: None,
             alpn: Default::default(),
@@ -695,8 +684,8 @@ type PendingBi =
 pub struct SessionAccept {
     session_id: VarInt,
 
-    // Shared session error for propagation to accepted streams.
-    error: Arc<OnceLock<SessionError>>,
+    // Shared close reason for propagation to accepted streams.
+    close: Arc<CloseReason>,
 
     // We also need to keep a reference to the qpack streams if the endpoint (incorrectly) creates
     // them. Again, this is just so they don't get closed until we drop the session.
@@ -726,11 +715,7 @@ pub struct SessionAccept {
 }
 
 impl SessionAccept {
-    pub(crate) fn new(
-        conn: noq::Connection,
-        session_id: VarInt,
-        error: Arc<OnceLock<SessionError>>,
-    ) -> Self {
+    pub(crate) fn new(conn: noq::Connection, session_id: VarInt, close: Arc<CloseReason>) -> Self {
         // Create a stream that just outputs new streams, so it's easy to call from poll.
         let accept_uni = Box::pin(futures::stream::unfold(conn.clone(), |conn| async {
             Some((conn.accept_uni().await, conn))
@@ -747,7 +732,7 @@ impl SessionAccept {
 
         Self {
             session_id,
-            error,
+            close,
 
             qpack_decoder: None,
             qpack_encoder: None,
@@ -818,7 +803,7 @@ impl SessionAccept {
             // Decide if we keep looping based on the type.
             match typ {
                 StreamUni::WEBTRANSPORT => {
-                    let recv = RecvStream::new(recv, self.error.clone());
+                    let recv = RecvStream::new(recv, self.close.clone());
                     return Poll::Ready(Ok(recv));
                 }
                 StreamUni::QPACK_DECODER => {
@@ -905,8 +890,8 @@ impl SessionAccept {
 
             if let Some((send, recv)) = res {
                 // Wrap the streams in our own types for correct error codes.
-                let send = SendStream::new(send, self.error.clone());
-                let recv = RecvStream::new(recv, self.error.clone());
+                let send = SendStream::new(send, self.close.clone());
+                let recv = RecvStream::new(recv, self.close.clone());
                 return Poll::Ready(Ok((send, recv)));
             }
 
