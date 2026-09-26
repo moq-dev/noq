@@ -67,8 +67,5 @@ pub use http;
 /// [`SessionAccept`]'s poll methods holds its place in the accept queue.
 pub use kio;
 
-/// Re-export the generic WebTransport implementation.
-pub use web_transport_trait as generic;
-
 /// Re-export the WebTransport protocol implementation.
 pub use web_transport_proto as proto;
