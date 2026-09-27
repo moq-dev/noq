@@ -6,6 +6,15 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 1.3.2
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#11](https://github.com/moq-dev/noq/pull/11) report a raw QUIC peer's close code from `web-transport-moq` sessions, instead of none. Fork-only.
+- [#12](https://github.com/moq-dev/noq/pull/12) make BBR respond to classic ECN: CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, and no longer counts as a loss. Not offered upstream yet; it builds on the `PacketId` series.
+
+No API change.
+
 ## 1.3.1
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
