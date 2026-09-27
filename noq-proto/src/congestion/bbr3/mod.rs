@@ -515,9 +515,9 @@ pub struct Bbr3 {
     /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
     /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
     rs_has_data: bool,
-    /// Whether the last ACK delivered a tracked packet, so `rs` describes it. A CE event is
-    /// reported after its ACK ends, and an ACK of only untracked packets leaves an older `rs`.
-    rs_from_last_ack: bool,
+    /// The last ACK's own rate sample, if it delivered a tracked packet. A CE event is reported
+    /// after its ACK ends and after loss detection, which rewrites `rs` per lost packet.
+    ack_rs: Option<BbrRateSample>,
     /// equivalent to RS.newly_acked, accumulated over the ACK being processed. It is passed to
     /// the ACK's model steps rather than kept in `rs`, so no later `set_cwnd` counts it again.
     newly_acked: u64,
@@ -699,7 +699,7 @@ impl Bbr3 {
             lost: 0,
             rs: None,
             rs_has_data: false,
-            rs_from_last_ack: false,
+            ack_rs: None,
             newly_acked: 0,
             packets: Default::default(),
             rounds_since_bw_probe: 0,
@@ -1624,8 +1624,7 @@ impl Bbr3 {
             // untracked ACK-only one. The probe's feedback can still be arriving after the ACK
             // itself ended the probe.
             _ if self.bw_probe_samples => {
-                let rs = self.rs.filter(|_| self.rs_from_last_ack);
-                self.handle_inflight_too_high(now, rs);
+                self.handle_inflight_too_high(now, self.ack_rs);
             }
             _ => {}
         }
@@ -1855,8 +1854,8 @@ impl Bbr3 {
         let newly_acked = std::mem::take(&mut self.newly_acked);
         // An ACK that delivered no tracked packet has no sample, and a finished one is never
         // folded twice.
-        self.rs_from_last_ack = std::mem::take(&mut self.rs_has_data);
-        if !self.rs_from_last_ack {
+        self.ack_rs = None;
+        if !std::mem::take(&mut self.rs_has_data) {
             return;
         }
         let Some(mut rs) = self.rs else {
@@ -1874,6 +1873,7 @@ impl Bbr3 {
             rs.delivery_rate = rs.delivered as f64 / rs.interval.as_secs_f64();
         }
         self.rs = Some(rs);
+        self.ack_rs = Some(rs);
         self.update_model_and_state(rs.last_packet, newly_acked, now);
         self.update_control_parameters(newly_acked);
     }
@@ -8056,6 +8056,26 @@ mod test {
             .on_congestion_event(now, now, false, true, 0, 1000, SpaceKind::Data);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
         assert_eq!(sim.bbr.inflight_longterm, 100_000);
+    }
+
+    /// The transport detects losses between an ACK and its CE event. A loss too small to show
+    /// inflight too high rewrites `rs` with the lost packet's flight, and CE still bounds the
+    /// probe by the marked ACK's own sample.
+    #[test]
+    fn ce_after_loss_detection_bounds_by_the_ack_sample() {
+        let mut sim = probing_up();
+        // Packet 109 is sent with 100 packets in flight, so losing it alone stays under
+        // LOSS_THRESH.
+        sim.send(10 * MS, 90);
+        sim.ack(20 * MS, 10..20, false);
+        sim.lose(20 * MS, 109);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
+        let now = sim.at(20 * MS);
+        sim.bbr
+            .on_congestion_event(now, sim.at(10 * MS), false, true, 0, 19, SpaceKind::Data);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        // Packet 19 was sent with ten packets in flight.
+        assert_eq!(sim.bbr.inflight_longterm, 12_000);
     }
 
     /// A scripted `Sim` cruising after a loss-free probe of 12 MB/s over a 10ms RTT.
