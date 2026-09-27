@@ -1,38 +1,35 @@
 use std::{
     io,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
 
-use crate::{ClosedStream, ReadError, ReadExactError, ReadToEndError, SessionError};
+use crate::{CloseReason, ClosedStream, ReadError, ReadExactError, ReadToEndError, SessionError};
 
 /// A stream that can be used to receive bytes. See [`noq::RecvStream`].
 #[derive(Debug)]
 pub struct RecvStream {
     inner: noq::RecvStream,
-    error: Arc<OnceLock<SessionError>>,
+    close: Arc<CloseReason>,
 }
 
 impl RecvStream {
-    pub(crate) fn new(stream: noq::RecvStream, error: Arc<OnceLock<SessionError>>) -> Self {
+    pub(crate) fn new(stream: noq::RecvStream, close: Arc<CloseReason>) -> Self {
         Self {
             inner: stream,
-            error,
+            close,
         }
     }
 
-    /// Replace connection-level errors with the stored session error if available.
+    /// Report a session error as the session's close reason.
     fn map_error(&self, e: impl Into<ReadError>) -> ReadError {
-        let e = e.into();
-        if let Some(err) = self.error.get() {
-            if matches!(&e, ReadError::SessionError(_)) {
-                return ReadError::SessionError(err.clone());
-            }
+        match e.into() {
+            ReadError::SessionError(e) => ReadError::SessionError(self.close.map(e)),
+            e => e,
         }
-        e
     }
 
     /// Tell the other end to stop sending data with the given error code. See
@@ -97,9 +94,7 @@ impl RecvStream {
         match self.inner.received_reset().await {
             Ok(None) => Ok(None),
             Ok(Some(code)) => Ok(web_transport_proto::error_from_http3(code.into_inner())),
-            Err(noq::ResetError::ConnectionLost(conn_err)) => {
-                Err(self.error.get().cloned().unwrap_or_else(|| conn_err.into()))
-            }
+            Err(noq::ResetError::ConnectionLost(conn_err)) => Err(self.close.map(conn_err.into())),
             Err(noq::ResetError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
         }
     }

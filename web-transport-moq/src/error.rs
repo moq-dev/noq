@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use thiserror::Error;
 
@@ -64,6 +64,59 @@ impl From<noq::ConnectionError> for SessionError {
                 }
             }
             _ => SessionError::ConnectionError(e),
+        }
+    }
+}
+
+/// Why a session closed, shared by the session and its streams. The first close wins.
+#[derive(Debug)]
+pub(crate) struct CloseReason {
+    // Raw QUIC carries the application code as is; HTTP/3 maps it into its own code space.
+    raw: bool,
+    reason: OnceLock<SessionError>,
+}
+
+impl CloseReason {
+    pub(crate) fn new(raw: bool) -> Self {
+        Self {
+            raw,
+            reason: OnceLock::new(),
+        }
+    }
+
+    /// Record the close reason, returning false if one was already recorded.
+    pub(crate) fn set(&self, err: SessionError) -> bool {
+        self.reason.set(err).is_ok()
+    }
+
+    /// Replace an error caused by the connection closing with the recorded reason, or
+    /// decode the peer's raw QUIC close code when none was recorded.
+    pub(crate) fn map(&self, err: SessionError) -> SessionError {
+        let conn = match &err {
+            SessionError::ConnectionError(conn)
+            | SessionError::SendDatagramError(noq::SendDatagramError::ConnectionLost(conn)) => {
+                Some(conn)
+            }
+            SessionError::WebTransportError(WebTransportError::Closed(..)) => None,
+            _ => return err,
+        };
+
+        if let Some(reason) = self.reason.get() {
+            return reason.clone();
+        }
+
+        match conn {
+            Some(noq::ConnectionError::ApplicationClosed(close)) if self.raw => {
+                match u32::try_from(close.error_code.into_inner()) {
+                    Ok(code) => WebTransportError::Closed(
+                        code,
+                        String::from_utf8_lossy(&close.reason).into_owned(),
+                    )
+                    .into(),
+                    Err(_) => err,
+                }
+            }
+            _ => err,
         }
     }
 }
