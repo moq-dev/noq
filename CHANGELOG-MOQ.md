@@ -6,17 +6,29 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 2.0.0
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+Carries everything in 1.3.2, plus:
+
+- [#13](https://github.com/moq-dev/noq/pull/13) implement `web-transport-trait` 0.5 in `web-transport-moq`. Fork-only.
+
+### Breaking
+
+- `web-transport-moq` implements `web-transport-trait` 0.5 instead of 0.4.
+- `web-transport-moq` no longer re-exports `web-transport-trait` as `generic`; depend on `web-transport-trait` directly.
+
+`moq-noq`, `moq-noq-proto`, and `moq-noq-udp` are unchanged from 1.3.2, bumped only because all four share one version.
+
 ## 1.3.2
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
 
 - [#11](https://github.com/moq-dev/noq/pull/11) report a raw QUIC peer's close code from `web-transport-moq` sessions, instead of none. Fork-only.
 - [#12](https://github.com/moq-dev/noq/pull/12) make BBR respond to classic ECN: CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, and no longer counts as a loss. Not offered upstream yet; it builds on the `PacketId` series.
-- [#13](https://github.com/moq-dev/noq/pull/13) implement `web-transport-trait` 0.5 in `web-transport-moq`. Fork-only.
 
-### API
-
-- `web-transport-moq` implements `web-transport-trait` 0.5 instead of 0.4, and no longer re-exports it as `generic`; depend on `web-transport-trait` directly.
+No API change.
 
 ## 1.3.1
 
