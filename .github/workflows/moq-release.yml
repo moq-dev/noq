@@ -25,7 +25,8 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Room for every crate's index wait below.
+    timeout-minutes: 60
     environment: release
     permissions:
       id-token: write
