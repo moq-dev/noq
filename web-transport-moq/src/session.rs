@@ -393,9 +393,10 @@ impl Session {
     /// capsule is written on the CONNECT stream before the QUIC connection is closed.
     /// This allows browser clients to receive the close code and reason via `WebTransport.closed`.
     ///
-    /// The capsule write and connection close happen asynchronously in a spawned task.
-    /// Callers should `await` [`Session::closed()`] to ensure the capsule has been
-    /// delivered. Session operations will fail once the QUIC connection is closed.
+    /// The capsule write and connection close happen asynchronously in a spawned task
+    /// that keeps the session alive until then, so the caller may drop it right away.
+    /// `await` [`Session::closed()`] to learn when the connection is gone. Session
+    /// operations will fail once the QUIC connection is closed.
     pub fn close(&self, code: u32, reason: &[u8]) {
         // First close wins: a no-op if the connection already closed, the background
         // task recorded a remote close, or close() was already called.
@@ -414,7 +415,6 @@ impl Session {
 
             if let Some(send) = send {
                 let reason = String::from_utf8_lossy(reason).into_owned();
-                let conn = self.conn.clone();
                 let capsule =
                     web_transport_proto::Capsule::CloseWebTransportSession { code, reason };
                 let rtt = self
@@ -423,8 +423,15 @@ impl Session {
                     .unwrap_or(Duration::from_millis(100));
                 let timeout = (rtt * 3).max(Duration::from_millis(100));
 
+                // The task owns a clone of the whole session, not just the connection:
+                // dropping the caller's last handle would otherwise end the HTTP/3
+                // control and QPACK streams before the capsule is delivered, which a
+                // browser treats as a connection error, losing the code and reason.
+                let session = self.clone();
                 tokio::spawn(async move {
-                    Self::close_with_capsule(conn, send, capsule, code, timeout).await;
+                    session
+                        .close_with_capsule(send, capsule, code, timeout)
+                        .await;
                 });
             }
         } else {
@@ -436,7 +443,7 @@ impl Session {
     /// Write the CloseWebTransportSession capsule, finish the stream, wait for
     /// the peer to close the connection (or timeout), then force-close.
     async fn close_with_capsule(
-        conn: noq::Connection,
+        &self,
         mut send: noq::SendStream,
         capsule: web_transport_proto::Capsule,
         code: u32,
@@ -456,7 +463,7 @@ impl Session {
         Frame::DATA.encode(&mut frame);
         let Ok(len) = VarInt::try_from(capsule_bytes.len()) else {
             tracing::warn!("capsule too large to encode as DATA frame");
-            conn.close(http3_code, b"");
+            self.conn.close(http3_code, b"");
             return;
         };
         len.encode(&mut frame);
@@ -465,21 +472,24 @@ impl Session {
         // Write the DATA frame to the CONNECT send stream.
         if let Err(e) = send.write_all(&frame).await {
             tracing::warn!(?e, "failed to write CloseWebTransportSession capsule");
-            conn.close(http3_code, b"");
+            self.conn.close(http3_code, b"");
             return;
         }
 
         // FIN the send stream so the peer knows no more capsules are coming.
         if let Err(e) = send.finish() {
             tracing::warn!(?e, "failed to finish CONNECT send stream");
-            conn.close(http3_code, b"");
+            self.conn.close(http3_code, b"");
             return;
         }
 
         // Wait for the peer to close the CONNECT stream after receiving the capsule.
-        if tokio::time::timeout(timeout, conn.closed()).await.is_err() {
+        if tokio::time::timeout(timeout, self.conn.closed())
+            .await
+            .is_err()
+        {
             tracing::debug!("timeout waiting for peer to close; force-closing connection");
-            conn.close(http3_code, b"");
+            self.conn.close(http3_code, b"");
         }
     }
 
