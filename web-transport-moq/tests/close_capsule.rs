@@ -32,7 +32,11 @@ async fn close_then_drop_keeps_control_stream() -> Result<()> {
         &signing_key,
     )));
 
-    let mut server_crypto = rustls::ServerConfig::builder()
+    // The workspace enables both rustls providers, so pick one explicitly.
+    let provider = web_transport_moq::crypto::default_provider();
+
+    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_no_client_auth()
         .with_single_cert(vec![cert.der().clone()], key)?;
     server_crypto.alpn_protocols = vec![ALPN.as_bytes().to_vec()];
@@ -43,7 +47,8 @@ async fn close_then_drop_keeps_control_stream() -> Result<()> {
 
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.der().clone())?;
-    let mut client_crypto = rustls::ClientConfig::builder()
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_root_certificates(roots)
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![ALPN.as_bytes().to_vec()];
