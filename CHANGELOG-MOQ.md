@@ -6,6 +6,14 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 1.3.3
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#20](https://github.com/moq-dev/noq/pull/20) report a stream reset before its WebTransport header as the reset (`WebTransportError::ReadError`), logged at debug, instead of `UnknownSession` at WARN. `UnknownSession` now means only a session ID mismatch. Backport of [#19](https://github.com/moq-dev/noq/pull/19). Fork-only.
+
+No API change.
+
 ## 1.3.2
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
