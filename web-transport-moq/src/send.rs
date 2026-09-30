@@ -24,19 +24,25 @@ impl SendStream {
         Self { stream, close }
     }
 
-    /// Report a session error as the session's close reason.
-    fn map_error(&self, e: impl Into<WriteError>) -> WriteError {
-        match e.into() {
-            WriteError::SessionError(e) => WriteError::SessionError(self.close.map(e)),
-            e => e,
+    /// Decode the peer's stop code, and report a session error as the session's close reason.
+    fn map_error(&self, e: noq::WriteError) -> WriteError {
+        match e {
+            noq::WriteError::Stopped(code) => match self.close.decode_stream_code(code) {
+                Some(code) => WriteError::Stopped(code),
+                None => WriteError::InvalidStopped(code),
+            },
+            e => match WriteError::from(e) {
+                WriteError::SessionError(e) => WriteError::SessionError(self.close.map(e)),
+                e => e,
+            },
         }
     }
 
     /// Abruptly reset the stream with the provided error code. See [`noq::SendStream::reset`].
     /// This is a u32 with WebTransport because we share the error space with HTTP/3.
+    /// A raw QUIC session sends the code as is.
     pub fn reset(&mut self, code: u32) -> Result<(), ClosedStream> {
-        let code = web_transport_proto::error_to_http3(code);
-        let code = noq::VarInt::try_from(code).unwrap();
+        let code = self.close.encode_stream_code(code);
         self.stream.reset(code).map_err(Into::into)
     }
 
@@ -48,7 +54,7 @@ impl SendStream {
     /// supported.
     pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
         match self.stream.stopped().await {
-            Ok(Some(code)) => Ok(web_transport_proto::error_from_http3(code.into_inner())),
+            Ok(Some(code)) => Ok(self.close.decode_stream_code(code)),
             Ok(None) => Ok(None),
             Err(noq::StoppedError::ConnectionLost(conn_err)) => {
                 Err(self.close.map(conn_err.into()))
