@@ -24,20 +24,25 @@ impl RecvStream {
         }
     }
 
-    /// Report a session error as the session's close reason.
-    fn map_error(&self, e: impl Into<ReadError>) -> ReadError {
-        match e.into() {
-            ReadError::SessionError(e) => ReadError::SessionError(self.close.map(e)),
-            e => e,
+    /// Decode the peer's reset code, and report a session error as the session's close reason.
+    fn map_error(&self, e: noq::ReadError) -> ReadError {
+        match e {
+            noq::ReadError::Reset(code) => match self.close.decode_stream_code(code) {
+                Some(code) => ReadError::Reset(code),
+                None => ReadError::InvalidReset(code),
+            },
+            e => match ReadError::from(e) {
+                ReadError::SessionError(e) => ReadError::SessionError(self.close.map(e)),
+                e => e,
+            },
         }
     }
 
     /// Tell the other end to stop sending data with the given error code. See
     /// [`noq::RecvStream::stop`]. This is a u32 with WebTransport since it shares the error
-    /// space with HTTP/3.
+    /// space with HTTP/3. A raw QUIC session sends the code as is.
     pub fn stop(&mut self, code: u32) -> Result<(), noq::ClosedStream> {
-        let code = web_transport_proto::error_to_http3(code);
-        let code = noq::VarInt::try_from(code).unwrap();
+        let code = self.close.encode_stream_code(code);
         self.inner.stop(code)
     }
 
@@ -93,7 +98,7 @@ impl RecvStream {
     pub async fn received_reset(&mut self) -> Result<Option<u32>, SessionError> {
         match self.inner.received_reset().await {
             Ok(None) => Ok(None),
-            Ok(Some(code)) => Ok(web_transport_proto::error_from_http3(code.into_inner())),
+            Ok(Some(code)) => Ok(self.close.decode_stream_code(code)),
             Err(noq::ResetError::ConnectionLost(conn_err)) => Err(self.close.map(conn_err.into())),
             Err(noq::ResetError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
         }
