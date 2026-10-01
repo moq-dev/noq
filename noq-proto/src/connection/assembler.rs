@@ -114,7 +114,14 @@ impl Assembler {
         let mut buffers = old.into_sorted_vec();
         self.buffered = 0;
         let mut fragmented_buffered = 0;
-        let mut offset = self.bytes_read;
+        // In unordered mode bytes_read counts bytes returned, not a stream offset, so it
+        // cannot mark where unread data starts.
+        let start = if self.state.is_ordered() {
+            self.bytes_read
+        } else {
+            0
+        };
+        let mut offset = start;
         for chunk in buffers.iter_mut().rev() {
             chunk.try_mark_defragment(offset);
             let size = chunk.bytes.len();
@@ -126,7 +133,7 @@ impl Assembler {
         }
         self.allocated = self.buffered;
         let mut buffer = BytesMut::with_capacity(fragmented_buffered);
-        let mut offset = self.bytes_read;
+        let mut offset = start;
         for chunk in buffers.into_iter().rev() {
             // bytes might be empty after try_mark_defragment
             if chunk.bytes.is_empty() {
@@ -779,6 +786,25 @@ mod test {
         }
     }
 
+    /// Count-triggered compaction keeps unread data in unordered mode, where bytes_read is
+    /// not a stream offset.
+    #[test]
+    fn unordered_compaction_keeps_unread_data() {
+        let mut x = Assembler::new();
+        x.ensure_ordering(false).unwrap();
+        x.insert(100_000, Bytes::from(vec![0u8; 10_000]), 10_000)
+            .unwrap();
+        assert_eq!(x.read(usize::MAX, false).unwrap().bytes.len(), 10_000);
+        for i in 0..(COMPACT_THRESHOLD as u64 + 1) {
+            x.insert(i, Bytes::from_static(b"a"), 1).unwrap();
+        }
+        let mut got = 0;
+        while let Some(c) = x.read(usize::MAX, false) {
+            got += c.bytes.len();
+        }
+        assert_eq!(got, COMPACT_THRESHOLD + 1);
+    }
+
     #[test]
     fn bounded_chunks_duplicate_flood() {
         // Duplicates against a stream already at the cap. Ordered mode does not dedup,
@@ -970,11 +996,7 @@ mod proptests {
                     let expected = reference.ensure_ordering(ordered);
                     prop_assert_eq!(actual, expected, "ensure_ordering result mismatch");
                 }
-                Op::Defragment => {
-                    if asm.state.is_ordered() {
-                        asm.defragment();
-                    }
-                }
+                Op::Defragment => asm.defragment(),
             }
         }
 
