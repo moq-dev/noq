@@ -6,6 +6,16 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 1.3.3
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#26](https://github.com/moq-dev/noq/pull/26) bound the stream and CRYPTO reassembly buffers at 1024 chunks after compaction, closing the connection with `INTERNAL_ERROR` past it ([RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185.html)). Carries [quinn-rs/quinn#2694](https://github.com/quinn-rs/quinn/pull/2694), [#2789](https://github.com/quinn-rs/quinn/pull/2789), and [#2814](https://github.com/quinn-rs/quinn/pull/2814), matching quinn-proto 0.11.18. Backport of [#25](https://github.com/moq-dev/noq/pull/25). Upstream: [n0-computer/noq#828](https://github.com/n0-computer/noq/pull/828) (open).
+- [#20](https://github.com/moq-dev/noq/pull/20) report a stream reset before its WebTransport header as the reset (`WebTransportError::ReadError`), logged at debug, instead of `UnknownSession` at WARN. `UnknownSession` now means only a session ID mismatch. Backport of [#19](https://github.com/moq-dev/noq/pull/19). Fork-only.
+- [#24](https://github.com/moq-dev/noq/pull/24) keep a `web-transport-moq` session's HTTP/3 control and QPACK streams open until its close capsule is delivered, so browsers see the close code and reason instead of "Connection lost.". Backport of [#23](https://github.com/moq-dev/noq/pull/23). Fork-only.
+
+No API change. A peer that exceeds the reassembly cap is now closed.
+
 ## 1.3.2
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
