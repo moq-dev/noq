@@ -69,6 +69,9 @@ impl From<noq::ConnectionError> for SessionError {
 }
 
 /// Why a session closed, shared by the session and its streams. The first close wins.
+///
+/// It also knows whether the session is raw QUIC, which decides how its close and stream
+/// codes are encoded.
 #[derive(Debug)]
 pub(crate) struct CloseReason {
     // Raw QUIC carries the application code as is; HTTP/3 maps it into its own code space.
@@ -81,6 +84,26 @@ impl CloseReason {
         Self {
             raw,
             reason: OnceLock::new(),
+        }
+    }
+
+    /// The QUIC code to reset or stop a stream with.
+    pub(crate) fn encode_stream_code(&self, code: u32) -> noq::VarInt {
+        if self.raw {
+            return code.into();
+        }
+        noq::VarInt::try_from(web_transport_proto::error_to_http3(code)).unwrap()
+    }
+
+    /// Decode the peer's QUIC code for a stream reset or stop, or None if it is not one.
+    pub(crate) fn decode_stream_code(&self, code: noq::VarInt) -> Option<u32> {
+        let code = code.into_inner();
+        // An older raw peer maps its codes into the HTTP/3 range too. No u32 reaches that
+        // range, so the mapped form cannot be mistaken for a raw code.
+        match web_transport_proto::error_from_http3(code) {
+            Some(code) => Some(code),
+            None if self.raw => u32::try_from(code).ok(),
+            None => None,
         }
     }
 
@@ -346,5 +369,37 @@ impl web_transport_trait::Error for ReadError {
             ReadError::Reset(code) => Some(*code),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WebTransport keeps the HTTP/3 mapping in both directions, and a code outside its
+    /// range is not a WebTransport code.
+    #[test]
+    fn http3_stream_codes_stay_mapped() {
+        let close = CloseReason::new(false);
+        let mapped = close.encode_stream_code(5);
+        assert_eq!(mapped.into_inner(), web_transport_proto::error_to_http3(5));
+        assert_eq!(close.decode_stream_code(mapped), Some(5));
+        assert_eq!(close.decode_stream_code(5u32.into()), None);
+    }
+
+    /// Raw QUIC sends the code as is and reads both the raw and the legacy mapped form.
+    #[test]
+    fn raw_stream_codes_pass_through() {
+        let close = CloseReason::new(true);
+        assert_eq!(close.encode_stream_code(5).into_inner(), 5);
+        assert_eq!(close.decode_stream_code(5u32.into()), Some(5));
+        assert_eq!(close.decode_stream_code(u32::MAX.into()), Some(u32::MAX));
+
+        let legacy = noq::VarInt::try_from(web_transport_proto::error_to_http3(5)).unwrap();
+        assert_eq!(close.decode_stream_code(legacy), Some(5));
+
+        // Past u32 and outside the HTTP/3 range: neither form.
+        let invalid = noq::VarInt::from_u64(1 << 40).unwrap();
+        assert_eq!(close.decode_stream_code(invalid), None);
     }
 }
