@@ -10,11 +10,15 @@ against the parent can be checked against a release.
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
 
-- [#25](https://github.com/moq-dev/noq/pull/25) bound the stream and CRYPTO reassembly buffers at 1024 chunks after compaction, closing the connection with `INTERNAL_ERROR` past it ([RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185.html)). Carries [quinn-rs/quinn#2694](https://github.com/quinn-rs/quinn/pull/2694), [#2789](https://github.com/quinn-rs/quinn/pull/2789), and [#2814](https://github.com/quinn-rs/quinn/pull/2814), matching quinn-proto 0.11.18. Also in 1.3.3 ([#26](https://github.com/moq-dev/noq/pull/26)). Upstream: [n0-computer/noq#828](https://github.com/n0-computer/noq/pull/828) (open).
-- [#19](https://github.com/moq-dev/noq/pull/19) report a stream reset before its WebTransport header as the reset (`WebTransportError::ReadError`), logged at debug, instead of `UnknownSession` at WARN. `UnknownSession` now means only a session ID mismatch. Also released as 1.3.3 from `release/1.3` ([#20](https://github.com/moq-dev/noq/pull/20)). Fork-only.
+- [#25](https://github.com/moq-dev/noq/pull/25) bound the stream and CRYPTO reassembly buffers at 1024 chunks after compaction, closing the connection with `INTERNAL_ERROR` past it ([RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185.html)). Carries [quinn-rs/quinn#2694](https://github.com/quinn-rs/quinn/pull/2694), [#2789](https://github.com/quinn-rs/quinn/pull/2789), and [#2814](https://github.com/quinn-rs/quinn/pull/2814), matching quinn-proto 0.11.18, plus a fix so compacting an unordered stream keeps its unread data (upstream noq starts compaction at `bytes_read`, which the new count trigger made reachable). Also in 1.3.3 ([#26](https://github.com/moq-dev/noq/pull/26)). Upstream: [n0-computer/noq#828](https://github.com/n0-computer/noq/pull/828) (open).
+- [#19](https://github.com/moq-dev/noq/pull/19) report a stream reset before its WebTransport header as the reset (`WebTransportError::ReadError`), logged at debug, instead of `UnknownSession` at WARN. `UnknownSession` now means only a missing or mismatched session ID. Also in 1.3.3 ([#20](https://github.com/moq-dev/noq/pull/20)). Fork-only.
 - [#23](https://github.com/moq-dev/noq/pull/23) keep a `web-transport-moq` session's HTTP/3 control and QPACK streams open until its close capsule is delivered, so browsers see the close code and reason instead of "Connection lost.". Also in 1.3.3 ([#24](https://github.com/moq-dev/noq/pull/24)). Fork-only.
+- [#27](https://github.com/moq-dev/noq/pull/27) send a raw QUIC session's (`Session::raw`) stream reset and stop codes as is, instead of mapping them into the HTTP/3 WebTransport range, and read a peer's code as is. Not in 1.3.3. Fork-only.
 
-No API change. A peer that exceeds the reassembly cap is now closed.
+No API change. Wire:
+
+- A peer that exceeds the reassembly cap is now closed.
+- Raw QUIC stream codes are compatible in one direction only: 2.0.1 still reads an older raw peer's mapped codes, but an older raw peer reads 2.0.1's codes as `InvalidReset` / `InvalidStopped`. HTTP/3 sessions are unchanged.
 
 ## 2.0.0
 
