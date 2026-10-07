@@ -6,6 +6,14 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 1.3.4
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#29](https://github.com/moq-dev/noq/pull/29) `web-transport-moq` reports a max datagram size of 0 instead of panicking when the peer did not negotiate datagrams. Backport of [#28](https://github.com/moq-dev/noq/pull/28). Fork-only.
+
+No API change.
+
 ## 1.3.3
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
