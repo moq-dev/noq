@@ -6,6 +6,14 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 1.3.5
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#33](https://github.com/moq-dev/noq/pull/33) reset the PTO backoff when Initial or Handshake keys are discarded (RFC 9002 A.11), so a client's Initial backoff no longer delays the probe for a lost Finished and the server no longer idles out first. Backport of [#32](https://github.com/moq-dev/noq/pull/32). Upstream quinn and n0-computer/noq have the same gap; not offered upstream yet.
+
+No API change.
+
 ## 1.3.4
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
