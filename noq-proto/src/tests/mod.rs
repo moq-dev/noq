@@ -2913,6 +2913,41 @@ fn handshake_outlasts_short_idle_timeout() {
     );
 }
 
+/// The handshake idle timeout picks the cap on the probe interval during the handshake, so a
+/// short one gets the fast cap even with the idle timeout disabled.
+#[test]
+fn handshake_idle_timeout_caps_probe_interval() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = TransportConfig::default();
+    transport
+        .max_idle_timeout(None)
+        .handshake_idle_timeout(Duration::from_secs(7));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    let start = pair.time;
+    // The first flight and the probes at 1s and 3s are lost.
+    while pair.time - start < Duration::from_secs(5) {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+    }
+
+    // The fast cap sends the next probe at about 6.05s, inside the 7s handshake idle timeout.
+    // The normal 2s cap would send it at about 7.05s, after the client gave up.
+    pair.drive();
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::HandshakeDataReady)
+    );
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::Connected)
+    );
+}
+
 /// An Initial left waiting for `accept` past the handshake idle timeout is stale, even
 /// though the idle timeout has not expired.
 #[test]
