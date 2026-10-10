@@ -2913,6 +2913,26 @@ fn handshake_outlasts_short_idle_timeout() {
     );
 }
 
+/// An Initial left waiting for `accept` past the handshake idle timeout is stale, even
+/// though the idle timeout has not expired.
+#[test]
+fn stale_initial_uses_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+    pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let incoming = pair.server.waiting_incoming.pop().unwrap();
+
+    // Past the 10s handshake idle timeout, inside the 30s idle timeout.
+    pair.time += Duration::from_secs(11);
+    assert_matches!(
+        pair.server.try_accept(incoming, pair.time),
+        Err(ConnectionError::TimedOut)
+    );
+}
+
 /// Ensures that the server can respond with 3 initial packets during the handshake
 /// before the anti-amplification limit kicks in when MTUs are similar.
 #[test]

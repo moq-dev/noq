@@ -15,8 +15,8 @@ use thiserror::Error;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    Duration, FourTuple, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, PathId,
-    RESET_TOKEN_SIZE, ResetToken, Side, Transmit, TransportConfig, TransportError,
+    FourTuple, INITIAL_MTU, Instant, MAX_CID_SIZE, MIN_INITIAL_SIZE, PathId, RESET_TOKEN_SIZE,
+    ResetToken, Side, Transmit, TransportConfig, TransportError,
     cid_generator::ConnectionIdGenerator,
     coding::{BufMutExt, Decodable, Encodable, UnexpectedEnd},
     config::{ClientConfig, EndpointConfig, ServerConfig},
@@ -567,13 +567,8 @@ impl Endpoint {
         let server_config =
             server_config.unwrap_or_else(|| self.server_config.as_ref().unwrap().clone());
 
-        if server_config
-            .transport
-            .max_idle_timeout
-            .is_some_and(|timeout| {
-                incoming.received_at + Duration::from_millis(timeout.into()) <= now
-            })
-        {
+        // The handshake starts when its Initial arrives, not when it is accepted.
+        if incoming.received_at + server_config.transport.handshake_idle_timeout <= now {
             debug!("abandoning accept of stale initial");
             self.index.remove_initial(dst_cid);
             return Err(Box::new(AcceptError {
