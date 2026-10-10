@@ -6,6 +6,14 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 2.0.4
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#34](https://github.com/moq-dev/noq/pull/34) add `TransportConfig::handshake_idle_timeout`, default 10s (msquic's `HandshakeIdleTimeoutMs`). It bounds the handshake in place of `max_idle_timeout`, including an Initial waiting for `accept`, and picks the handshake's probe interval cap, so a short idle timeout meant for dead-peer detection no longer cuts a handshake to two Initial flights. Not offered upstream.
+
+API: adds `TransportConfig::handshake_idle_timeout`. Behavior: a handshake to an unreachable peer now gives up after the handshake idle timeout instead of the idle timeout (sooner with the 30s default, later with an idle timeout under 10s), and a server drops an Initial still waiting for `accept` after 10s by default.
+
 ## 2.0.3
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
