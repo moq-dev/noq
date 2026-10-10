@@ -3913,11 +3913,15 @@ impl Connection {
     /// enabled there is an additional per-path idle timeout.
     fn reset_idle_timeout(&mut self, now: Instant, space: SpaceKind, path_id: PathId) {
         // First reset the global idle timeout.
-        if let Some(timeout) = self.idle_timeout {
-            if self.state.is_closed() {
-                self.timers
-                    .stop(Timer::Conn(ConnTimer::Idle), self.qlog.with_time(now));
-            } else {
+        let timeout = if self.state.is_closed() {
+            None
+        } else if self.state.is_handshake() {
+            Some(self.config.handshake_idle_timeout)
+        } else {
+            self.idle_timeout
+        };
+        match timeout {
+            Some(timeout) => {
                 let dt = cmp::max(timeout, 3 * self.max_pto_for_space(space));
                 self.timers.set(
                     Timer::Conn(ConnTimer::Idle),
@@ -3925,6 +3929,9 @@ impl Connection {
                     self.qlog.with_time(now),
                 );
             }
+            None => self
+                .timers
+                .stop(Timer::Conn(ConnTimer::Idle), self.qlog.with_time(now)),
         }
 
         // Now handle the per-path state.
@@ -4800,6 +4807,8 @@ impl Connection {
 
                 self.events.push_back(Event::Connected);
                 self.state.move_to_established();
+                // Swap the handshake idle timeout for the negotiated one.
+                self.reset_idle_timeout(now, SpaceKind::Data, path_id);
                 trace!("established");
 
                 // Multipath can only be enabled after the state has reached Established.

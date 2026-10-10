@@ -66,6 +66,7 @@ fn handshake_timeout() {
     let mut transport_config = TransportConfig::default();
     transport_config
         .max_idle_timeout(Some(IDLE_TIMEOUT.try_into().unwrap()))
+        .handshake_idle_timeout(IDLE_TIMEOUT)
         .initial_rtt(Duration::from_millis(10));
     client_config.transport_config(Arc::new(transport_config));
 
