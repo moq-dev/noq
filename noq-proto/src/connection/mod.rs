@@ -3633,11 +3633,18 @@ impl Connection {
         let path = self.path(path_id)?;
         let pto_count = path.pto_count;
 
+        // The idle timeout the probes have to beat, as `reset_idle_timeout` arms it.
+        let idle = if self.state.is_handshake() {
+            Some(self.config.handshake_idle_timeout)
+        } else {
+            path.idle_timeout.or(self.idle_timeout)
+        };
+
         // Cap the maximum interval between two tail-loss probes.
         let max_interval = if path.rtt.get() > SLOW_RTT_THRESHOLD {
             // For slow links we want to increase the interval beyond 2s.
             (path.rtt.get() * 3) / 2
-        } else if let Some(idle) = path.idle_timeout.or(self.idle_timeout)
+        } else if let Some(idle) = idle
             && idle <= MIN_IDLE_FOR_FAST_PTO
         {
             // If the idle timeout is relatively low, cap at 1s so we get plenty of retries
@@ -3913,18 +3920,28 @@ impl Connection {
     /// enabled there is an additional per-path idle timeout.
     fn reset_idle_timeout(&mut self, now: Instant, space: SpaceKind, path_id: PathId) {
         // First reset the global idle timeout.
-        if let Some(timeout) = self.idle_timeout {
-            if self.state.is_closed() {
-                self.timers
-                    .stop(Timer::Conn(ConnTimer::Idle), self.qlog.with_time(now));
-            } else {
-                let dt = cmp::max(timeout, 3 * self.max_pto_for_space(space));
+        let timeout = if self.state.is_closed() {
+            None
+        } else if self.state.is_handshake() {
+            Some(self.config.handshake_idle_timeout)
+        } else {
+            self.idle_timeout
+        };
+        // A deadline too far out to represent never fires.
+        let deadline = timeout.and_then(|timeout| {
+            now.checked_add(cmp::max(timeout, 3 * self.max_pto_for_space(space)))
+        });
+        match deadline {
+            Some(deadline) => {
                 self.timers.set(
                     Timer::Conn(ConnTimer::Idle),
-                    now + dt,
+                    deadline,
                     self.qlog.with_time(now),
                 );
             }
+            None => self
+                .timers
+                .stop(Timer::Conn(ConnTimer::Idle), self.qlog.with_time(now)),
         }
 
         // Now handle the per-path state.
@@ -4800,6 +4817,8 @@ impl Connection {
 
                 self.events.push_back(Event::Connected);
                 self.state.move_to_established();
+                // Swap the handshake idle timeout for the negotiated one.
+                self.reset_idle_timeout(now, SpaceKind::Data, path_id);
                 trace!("established");
 
                 // Multipath can only be enabled after the state has reached Established.

@@ -2871,6 +2871,119 @@ fn lost_finished_after_initial_backoff() {
     assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 
+/// A short idle timeout does not cut the handshake to two Initial flights.
+///
+/// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while
+/// the second probe is due 999ms + 1998ms after the first send, plus however late the first
+/// probe went out. The handshake idle timeout governs until the handshake completes.
+#[test]
+fn handshake_outlasts_short_idle_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_secs(2).try_into().unwrap()));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    let start = pair.time;
+    // The first flight is lost, and so is the first probe, which goes out 2ms late.
+    pair.drive_client();
+    pair.server.inbound.clear();
+    pair.time = pair.client.next_wakeup().unwrap() + Duration::from_millis(2);
+    loop {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+        // Past any pacing: the second probe, due 2999ms after the first send, beyond the
+        // old 2997ms idle deadline.
+        if pair.time - start > Duration::from_secs(2) {
+            break;
+        }
+    }
+
+    pair.drive();
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::HandshakeDataReady)
+    );
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::Connected)
+    );
+}
+
+/// The handshake idle timeout picks the cap on the probe interval during the handshake, so a
+/// short one gets the fast cap even with the idle timeout disabled.
+#[test]
+fn handshake_idle_timeout_caps_probe_interval() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let mut transport = TransportConfig::default();
+    transport
+        .max_idle_timeout(None)
+        .handshake_idle_timeout(Duration::from_secs(7));
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+
+    let client_ch = pair.begin_connect(client);
+    let start = pair.time;
+    // The first flight and the probes at 1s and 3s are lost.
+    while pair.time - start < Duration::from_secs(5) {
+        pair.drive_client();
+        pair.server.inbound.clear();
+        pair.time = pair.client.next_wakeup().unwrap();
+    }
+
+    // The fast cap sends the next probe at about 6.05s, inside the 7s handshake idle timeout.
+    // The normal 2s cap would send it at about 7.05s, after the client gave up.
+    pair.drive();
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::HandshakeDataReady)
+    );
+    assert_matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::Connected)
+    );
+}
+
+/// A handshake idle timeout too long to add to an `Instant` never fires, instead of panicking.
+#[test]
+fn unbounded_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.handshake_idle_timeout(Duration::MAX);
+    let transport = Arc::new(transport);
+    let mut server = server_config();
+    server.transport = transport.clone();
+    let mut client = client_config();
+    client.transport_config(transport);
+
+    let mut pair = Pair::new(Default::default(), server);
+    pair.connect_with(client);
+}
+
+/// An Initial left waiting for `accept` past the handshake idle timeout is stale, even
+/// though the idle timeout has not expired.
+#[test]
+fn stale_initial_uses_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+    pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    let incoming = pair.server.waiting_incoming.pop().unwrap();
+
+    // Past the 10s handshake idle timeout, inside the 30s idle timeout.
+    pair.time += Duration::from_secs(11);
+    assert_matches!(
+        pair.server.try_accept(incoming, pair.time),
+        Err(ConnectionError::TimedOut)
+    );
+}
+
 /// Ensures that the server can respond with 3 initial packets during the handshake
 /// before the anti-amplification limit kicks in when MTUs are similar.
 #[test]
