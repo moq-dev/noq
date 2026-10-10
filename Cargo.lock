@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "moq-noq"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "async-executor",
@@ -1919,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "aes-gcm",
  "arbitrary",
@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "cfg_aliases",
  "criterion",
@@ -3531,7 +3531,7 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "2.0.2"
+version = "2.0.3"
 dependencies = [
  "anyhow",
  "bytes",
