@@ -2948,6 +2948,22 @@ fn handshake_idle_timeout_caps_probe_interval() {
     );
 }
 
+/// A handshake idle timeout too long to add to an `Instant` never fires, instead of panicking.
+#[test]
+fn unbounded_handshake_idle_timeout() {
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.handshake_idle_timeout(Duration::MAX);
+    let transport = Arc::new(transport);
+    let mut server = server_config();
+    server.transport = transport.clone();
+    let mut client = client_config();
+    client.transport_config(transport);
+
+    let mut pair = Pair::new(Default::default(), server);
+    pair.connect_with(client);
+}
+
 /// An Initial left waiting for `accept` past the handshake idle timeout is stale, even
 /// though the idle timeout has not expired.
 #[test]

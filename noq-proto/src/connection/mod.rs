@@ -3927,12 +3927,15 @@ impl Connection {
         } else {
             self.idle_timeout
         };
-        match timeout {
-            Some(timeout) => {
-                let dt = cmp::max(timeout, 3 * self.max_pto_for_space(space));
+        // A deadline too far out to represent never fires.
+        let deadline = timeout.and_then(|timeout| {
+            now.checked_add(cmp::max(timeout, 3 * self.max_pto_for_space(space)))
+        });
+        match deadline {
+            Some(deadline) => {
                 self.timers.set(
                     Timer::Conn(ConnTimer::Idle),
-                    now + dt,
+                    deadline,
                     self.qlog.with_time(now),
                 );
             }

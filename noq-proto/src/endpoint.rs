@@ -568,7 +568,11 @@ impl Endpoint {
             server_config.unwrap_or_else(|| self.server_config.as_ref().unwrap().clone());
 
         // The handshake starts when its Initial arrives, not when it is accepted.
-        if incoming.received_at + server_config.transport.handshake_idle_timeout <= now {
+        if incoming
+            .received_at
+            .checked_add(server_config.transport.handshake_idle_timeout)
+            .is_some_and(|deadline| deadline <= now)
+        {
             debug!("abandoning accept of stale initial");
             self.index.remove_initial(dst_cid);
             return Err(Box::new(AcceptError {
