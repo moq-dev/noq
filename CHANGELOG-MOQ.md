@@ -6,6 +6,14 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## 2.0.5
+
+Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
+
+- [#38](https://github.com/moq-dev/noq/pull/38) repeat the pending ACK ranges in every Initial and Handshake packet, not only after a new ack-eliciting packet arrives, so a lost handshake ACK is resent in the receiver's next packet (a PTO probe, for one) instead of waiting for the sender's backed-off PTO. The Data space is unchanged. Upstream quinn bundles pending ACKs in every space since quinn-rs/quinn#2747; n0-computer/noq forked before it. Not offered upstream yet.
+
+API: none. Wire: no new frames, but Initial and Handshake packets may now carry an ACK frame they used to omit.
+
 ## 2.0.4
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.
