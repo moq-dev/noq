@@ -6199,11 +6199,18 @@ impl Connection {
         }
 
         // ACK
+        //
+        // In the Initial and Handshake spaces, every packet repeats the pending ACK ranges. A
+        // lost ACK of a multi-datagram flight's head otherwise makes the peer resend the whole
+        // flight on each PTO, and each resend can lose the tail again, until an ACK gets through.
         if !scheduling_info.is_abandoned && scheduling_info.may_send_data {
             for path_id in space
                 .number_spaces
                 .iter_mut()
-                .filter(|(_, pns)| pns.pending_acks.can_send())
+                .filter(|(_, pns)| {
+                    pns.pending_acks.can_send()
+                        || (space_id != SpaceId::Data && !pns.pending_acks.ranges().is_empty())
+                })
                 .map(|(&path_id, _)| path_id)
                 .collect::<Vec<_>>()
             {
