@@ -2871,7 +2871,7 @@ fn lost_finished_after_initial_backoff() {
     assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 
-/// A lost ACK of a two-datagram flight's head is repeated in the next packet the receiver
+/// A lost ACK of a multi-datagram flight's head is repeated in the next packet the receiver
 /// sends in that space, so the sender learns the head arrived without waiting on another ACK.
 #[test]
 fn lost_handshake_ack_repeats_in_next_packet() {
