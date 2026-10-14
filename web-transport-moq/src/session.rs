@@ -439,8 +439,7 @@ impl Session {
         }
     }
 
-    /// Write the CloseWebTransportSession capsule, finish the stream, wait for
-    /// the peer to close the connection (or timeout), then force-close.
+    /// Deliver the close capsule and FIN, then give the peer its teardown grace.
     async fn close_with_capsule(
         &self,
         mut send: noq::SendStream,
@@ -480,6 +479,25 @@ impl Session {
             tracing::warn!(?e, "failed to finish CONNECT send stream");
             self.conn.close(http3_code, b"");
             return;
+        }
+
+        // A queued write is not delivery: tearing down QUIC before the DATA and FIN
+        // are acknowledged can discard the capsule during loss recovery. Transport
+        // failure (including endpoint shutdown) also completes this wait.
+        match send.stopped().await {
+            Ok(None) => {}
+            Ok(Some(code)) => {
+                tracing::debug!(?code, "peer stopped the CONNECT stream during close");
+                self.conn.close(http3_code, b"");
+                return;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    ?e,
+                    "connection ended before the close capsule was acknowledged"
+                );
+                return;
+            }
         }
 
         // Wait for the peer to close the CONNECT stream after receiving the capsule.
@@ -1050,7 +1068,14 @@ impl web_transport_trait::Session for Session {
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests {
-    use std::{net::Ipv4Addr, sync::Arc};
+    use std::{
+        io::{self, IoSliceMut},
+        net::{Ipv4Addr, SocketAddr},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use rcgen::{CertifiedKey, KeyPair};
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -1059,8 +1084,77 @@ mod tests {
 
     const SESSION: VarInt = VarInt::from_u32(0);
 
+    #[derive(Debug, Default)]
+    struct Gate {
+        blocked: AtomicBool,
+        attempted: tokio::sync::Notify,
+        wakers: Mutex<Vec<Waker>>,
+    }
+
+    #[derive(Debug)]
+    struct Socket {
+        inner: Box<dyn noq::AsyncUdpSocket>,
+        gate: Arc<Gate>,
+    }
+
+    #[derive(Debug)]
+    struct Sender {
+        inner: Pin<Box<dyn noq::UdpSender>>,
+        gate: Arc<Gate>,
+    }
+
+    impl noq::UdpSender for Sender {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            transmit: &noq::udp::Transmit<'_>,
+            cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let mut wakers = this.gate.wakers.lock().unwrap();
+            if this.gate.blocked.load(Ordering::SeqCst) {
+                if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+                    wakers.push(cx.waker().clone());
+                }
+                this.gate.attempted.notify_one();
+                return Poll::Pending;
+            }
+            drop(wakers);
+            this.inner.as_mut().poll_send(transmit, cx)
+        }
+    }
+
+    impl noq::AsyncUdpSocket for Socket {
+        fn create_sender(&self) -> Pin<Box<dyn noq::UdpSender>> {
+            Box::pin(Sender {
+                inner: self.inner.create_sender(),
+                gate: self.gate.clone(),
+            })
+        }
+        fn poll_recv(
+            &mut self,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [noq::udp::RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            self.inner.poll_recv(cx, bufs, meta)
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
     /// A connected client and server QUIC connection, plus the endpoints that drive them.
     async fn pair() -> (noq::Connection, noq::Connection, [noq::Endpoint; 2]) {
+        let (client, server, endpoints, _) = gated_pair().await;
+        (client, server, endpoints)
+    }
+
+    async fn gated_pair() -> (
+        noq::Connection,
+        noq::Connection,
+        [noq::Endpoint; 2],
+        Arc<Gate>,
+    ) {
         #[cfg(all(feature = "aws-lc-rs", feature = "ring"))]
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -1072,7 +1166,20 @@ mod tests {
 
         let server_config =
             noq::ServerConfig::with_single_cert(vec![cert.der().clone()], key).unwrap();
-        let server = noq::Endpoint::server(server_config, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let runtime: Arc<dyn noq::Runtime> = Arc::new(noq::TokioRuntime);
+        let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let gate = Arc::new(Gate::default());
+        let socket = Socket {
+            inner: runtime.wrap_udp_socket(udp).unwrap(),
+            gate: gate.clone(),
+        };
+        let server = noq::Endpoint::new_with_abstract_socket(
+            Default::default(),
+            Some(server_config),
+            Box::new(socket),
+            runtime,
+        )
+        .unwrap();
 
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert.der().clone()).unwrap();
@@ -1085,7 +1192,72 @@ mod tests {
         let accept = async { server.accept().await.unwrap().await.unwrap() };
         let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, accept);
 
-        (client_conn, server_conn, [client, server])
+        (client_conn, server_conn, [client, server], gate)
+    }
+
+    /// A queued capsule must survive a stalled socket beyond the teardown grace.
+    #[tokio::test]
+    async fn close_waits_for_capsule_ack() {
+        close_with_stalled_socket(false).await;
+    }
+
+    /// Endpoint/drain cancellation must release a task waiting for a capsule ACK.
+    #[tokio::test]
+    async fn close_ack_wait_ends_with_connection() {
+        close_with_stalled_socket(true).await;
+    }
+
+    async fn close_with_stalled_socket(cancel: bool) {
+        let (client_conn, server_conn, _endpoints, gate) = gated_pair().await;
+        let (client, server) = tokio::join!(
+            Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+            async {
+                crate::Request::accept(server_conn)
+                    .await
+                    .unwrap()
+                    .ok()
+                    .await
+            },
+        );
+        let client = client.unwrap();
+        let server = server.unwrap();
+        let conn = server.conn.clone();
+        let settings = Arc::downgrade(server.settings.as_ref().unwrap());
+        tokio::time::pause();
+        gate.blocked.store(true, Ordering::SeqCst);
+        server.close(2, b"unauthorized");
+        drop(server);
+        gate.attempted.notified().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            conn.close_reason().is_none(),
+            "closed before the capsule was acknowledged"
+        );
+
+        if cancel {
+            conn.close(0u32.into(), b"drain deadline");
+            conn.closed().await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                settings.strong_count(),
+                0,
+                "close task retained the HTTP/3 streams after cancellation"
+            );
+            return;
+        }
+
+        gate.blocked.store(false, Ordering::SeqCst);
+        for waker in std::mem::take(&mut *gate.wakers.lock().unwrap()) {
+            waker.wake();
+        }
+        tokio::time::resume();
+        let err = client.closed().await;
+        assert!(
+            matches!(err, SessionError::WebTransportError(WebTransportError::Closed(2, ref reason)) if reason == "unauthorized"),
+            "{err:?}"
+        );
+        conn.closed().await;
     }
 
     fn assert_reset(err: SessionError) {
