@@ -1,6 +1,6 @@
-# The fork's own CI. Upstream's workflows stay in the tree so a sync never
-# conflicts on them, but they are disabled in the repository settings because
-# they need n0's self-hosted runners and secrets.
+# The fork's own CI. Upstream's workflows stay in the tree but are disabled in
+# the repository settings because they need n0's self-hosted runners and
+# secrets.
 name: moq-ci
 
 on:
