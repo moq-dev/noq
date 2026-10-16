@@ -1,16 +1,20 @@
 # noq (moq-dev fork)
 
+**Frozen.** This fork takes only security patches for
+[Media over QUIC](https://github.com/moq-dev/moq)'s `release` line, and will be
+archived once no released MoQ crate depends on it. Its successor is
+[`rs/moq-quic`](https://github.com/moq-dev/moq/tree/main/rs/moq-quic) in
+moq-dev/moq, a hard fork of quinn.
+
 This is [moq-dev](https://github.com/moq-dev)'s fork of
 [n0-computer/noq](https://github.com/n0-computer/noq), published on crates.io as
 `moq-noq`, `moq-noq-proto`, `moq-noq-udp`, and `web-transport-moq`, the
-WebTransport adapter over the fork. All four share one version and one release.
-It carries the QUIC features [Media over QUIC](https://github.com/moq-dev/moq)
-needs before they land upstream, and it never publishes under the parent's
-names. `PARENT` names the
-upstream commit each release includes, and `moq-sync` merges upstream weekly.
-General changes are offered upstream once their shape settles; the carried set
-is `git log --no-merges upstream/main..main`. [CHANGELOG-MOQ.md](CHANGELOG-MOQ.md) lists each
-release's parent and carried changes.
+WebTransport adapter over the fork. All four share one version and one release,
+and never publish under the parent's names. It no longer merges upstream.
+`PARENT` names the upstream commit each release includes, and the carried set
+is `git log --no-merges upstream/main..main`.
+[CHANGELOG-MOQ.md](CHANGELOG-MOQ.md) lists each release's parent and carried
+changes.
 
 The upstream README follows.
 
