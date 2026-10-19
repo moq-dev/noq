@@ -6,6 +6,12 @@ covers the parent. Each entry names the parent commit it carries and every
 change the fork carries on top, with its upstream status, so an advisory
 against the parent can be checked against a release.
 
+## Unreleased
+
+- Discarded Retry packets no longer prevent a client from following a genuine Retry or processing Version Negotiation. Retry packets whose source CID equals the client's original destination CID are now discarded too. Backport of [moq-dev/moq#5916](https://github.com/moq-dev/moq/pull/5916), adapted to the 1.3 connection state machine. Not offered upstream yet.
+
+No public API or wire change.
+
 ## 1.3.5
 
 Parent: n0-computer/noq [`1a26a8b0`](https://github.com/n0-computer/noq/commit/1a26a8b064d21e316fe6769f068617975bd8a27b), unchanged since 1.3.0.

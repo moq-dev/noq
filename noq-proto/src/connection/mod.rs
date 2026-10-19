@@ -225,8 +225,6 @@ pub struct Connection {
     // Congestion Control
     /// Whether the most recently received packet had an ECN codepoint set
     receiving_ecn: bool,
-    /// Number of packets authenticated
-    total_authed_packets: u64,
 
     //
     // ObservedAddr
@@ -400,7 +398,6 @@ impl Connection {
             )),
 
             receiving_ecn: false,
-            total_authed_packets: 0,
 
             next_observed_addr_seq_no: 0u32.into(),
 
@@ -3844,7 +3841,6 @@ impl Connection {
             .network_path
             .is_probably_same_path(remote);
 
-        self.total_authed_packets += 1;
         self.reset_keep_alive(path_id, now);
         self.reset_idle_timeout(now, space_id, path_id);
         self.path_data_mut(path_id).permit_idle_reset = true;
@@ -4616,6 +4612,9 @@ impl Connection {
             StateType::Draining | StateType::Drained => return Ok(()),
             StateType::Handshake => self.state.as_handshake_mut().expect("checked"),
         };
+        // Whether a server Initial was processed or a Retry accepted. Packets the client discards
+        // never count, or a forged Retry would make it ignore the genuine one.
+        let processed_server_packet = state.remote_cid_set || self.retry_src_cid.is_some();
 
         match packet.header {
             Header::Retry {
@@ -4639,9 +4638,10 @@ impl Connection {
                         )
                     })
                     .unwrap_or_default();
-                if self.total_authed_packets > 1
+                if processed_server_packet
                     || packet.payload.len() <= 16 // token + 16 byte tag
                     || !is_valid_retry
+                    || remote_cid == self.initial_dst_cid
                 {
                     trace!("discarding invalid Retry");
                     // - After the client has received and processed an Initial or Retry packet from
@@ -4864,7 +4864,8 @@ impl Connection {
                 Ok(())
             }
             Header::VersionNegotiate { .. } => {
-                if self.total_authed_packets > 1 {
+                // RFC 9000 6.2: discard once any other packet was processed.
+                if processed_server_packet {
                     return Ok(());
                 }
                 let supported = packet
